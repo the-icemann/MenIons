@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{ receipt.number }} · {{ snapshot.company.name }}</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #111; background: #fff;
+         max-width: 34rem; margin: 0 auto; padding: 1.25rem 1rem 2rem; line-height: 1.45; }
+  header { border-bottom: 2px solid #111; padding-bottom: .75rem; margin-bottom: 1rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .75rem; }
+  .muted { color: #555; font-size: .875rem; margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin: .5rem 0 1rem; }
+  th, td { text-align: left; vertical-align: top; padding: .4rem 0; border-bottom: 1px solid #ddd; }
+  th { font-weight: 500; color: #444; width: 42%; padding-right: .75rem; }
+  .amount { font-size: 1.35rem; font-weight: 700; margin: .5rem 0 1rem; }
+  .void { border: 2px solid #b00020; color: #b00020; font-weight: 700; padding: .6rem .75rem; margin-bottom: 1rem; }
+  .notes p { margin: .35rem 0; }
+  footer { margin-top: 1.5rem; padding-top: .75rem; border-top: 1px solid #ddd; font-size: .75rem; color: #555;
+           overflow-wrap: anywhere; }
+  @media print { body { max-width: none; padding: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ snapshot.company.name }}</h1>
+  {% if snapshot.company.address %}<p class="muted">{{ snapshot.company.address }}</p>{% endif %}
+  {% if snapshot.company.phone %}<p class="muted">Tel: {{ snapshot.company.phone }}</p>{% endif %}
+  {% if snapshot.company.tin %}<p class="muted">TIN: {{ snapshot.company.tin }}</p>{% endif %}
+</header>
+
+{% if voided_by %}
+<p class="void">VOID. This receipt was cancelled by {{ voided_by }} and must not be relied on.</p>
+{% endif %}
+
+<h2>{{ snapshot.title }}</h2>
+<table>
+  <tr><th scope="row">Receipt number</th><td>{{ receipt.number }}</td></tr>
+  <tr><th scope="row">Issued</th><td>{{ issued }}</td></tr>
+  <tr><th scope="row">Issued to</th><td>{{ snapshot.recipient.name }}{% if snapshot.recipient.phone %}, {{ snapshot.recipient.phone }}{% endif %}</td></tr>
+  {% for label, value in snapshot.lines %}
+  <tr><th scope="row">{{ label }}</th><td>{{ value }}</td></tr>
+  {% endfor %}
+</table>
+
+{% if amount %}<p class="amount">{{ amount }}</p>{% endif %}
+
+{% if snapshot.notes %}
+<div class="notes">
+  {% for note in snapshot.notes %}<p>{{ note }}</p>{% endfor %}
+</div>
+{% endif %}
+
+<footer>
+  <p>Record check: {{ receipt.hash }}</p>
+  <p>This receipt is part of a sealed record. It cannot be edited; a correction is issued as a separate void notice.</p>
+</footer>
+</body>
+</html>
