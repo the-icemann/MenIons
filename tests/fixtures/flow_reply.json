@@ -1,0 +1,44 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "102290129340398",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "256700000000",
+              "phone_number_id": "106540352242922"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Sarah N"
+                },
+                "wa_id": "256772123456"
+              }
+            ],
+            "messages": [
+              {
+                "from": "256772123456",
+                "id": "wamid.FLOW001",
+                "timestamp": "1762765200",
+                "type": "interactive",
+                "interactive": {
+                  "type": "nfm_reply",
+                  "nfm_reply": {
+                    "name": "flow",
+                    "body": "Sent",
+                    "response_json": "{\"flow_token\": \"onboard-42\", \"shop_name\": \"Kisementi Threads\", \"expected_daily_drops\": \"3-5\"}"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

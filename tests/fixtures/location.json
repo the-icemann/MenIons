@@ -1,0 +1,42 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "102290129340398",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "256700000000",
+              "phone_number_id": "106540352242922"
+            },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Sarah N"
+                },
+                "wa_id": "256772123456"
+              }
+            ],
+            "messages": [
+              {
+                "from": "256772123456",
+                "id": "wamid.LOC001",
+                "timestamp": "1762765200",
+                "type": "location",
+                "location": {
+                  "latitude": 0.3476,
+                  "longitude": 32.5825,
+                  "name": "Garden City",
+                  "address": "Yusuf Lule Road, Kampala"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
