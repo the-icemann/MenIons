@@ -11,7 +11,7 @@ from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app import cloud_api_adapter
+from app import cloud_api_adapter, kapso_adapter
 from app import router as event_router
 from app.clock import utcnow
 from app.config import Settings, get_settings
@@ -50,6 +50,14 @@ def _dedupe_key(event: InboundEvent) -> str | None:
     if isinstance(event, StatusUpdate):
         return f"{event.message_id}:{event.status}"
     return event.provider_message_id
+
+
+def parse_payload(raw: Any) -> list[InboundEvent]:
+    """Meta's Cloud API format has a top-level "entry" list; Kapso's own format has a
+    top-level "message". The signature was already checked, so the shape decides the reader."""
+    if kapso_adapter.is_kapso_payload(raw):
+        return kapso_adapter.parse(raw)
+    return cloud_api_adapter.parse(raw)
 
 
 def _kind(event: InboundEvent) -> str:
@@ -92,7 +100,7 @@ def receive(
         return {"status": "ok"}
 
     fresh: list[tuple[int, InboundEvent]] = []
-    for event in cloud_api_adapter.parse(raw):
+    for event in parse_payload(raw):
         row_id = _store(session, raw, key=_dedupe_key(event), kind=_kind(event))
         if row_id is None:
             log.info("duplicate webhook item ignored: %s", _dedupe_key(event))

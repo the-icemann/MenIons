@@ -1,0 +1,52 @@
+{
+  "message": {
+    "id": "wamid.KLOC001",
+    "from": "256772123456",
+    "type": "location",
+    "kapso": {
+      "origin": "cloud_api",
+      "status": "delivered",
+      "content": "Location: 0.3136, 32.5811",
+      "direction": "inbound",
+      "has_media": false,
+      "message_type_data": {
+        "latitude": 0.3136,
+        "longitude": 32.5811
+      },
+      "processing_status": "pending"
+    },
+    "context": null,
+    "location": {
+      "latitude": 0.3136,
+      "longitude": 32.5811
+    },
+    "username": null,
+    "timestamp": "1795013861",
+    "from_user_id": "UG.1000000000000001",
+    "from_parent_user_id": null
+  },
+  "conversation": {
+    "id": "dec4c3a4-bd25-4f9f-b9ce-0b0e3992461a",
+    "kapso": {
+      "messages_count": 3,
+      "last_inbound_at": "2026-11-18T14:57:41.785843Z",
+      "last_message_id": "wamid.KLOC001",
+      "last_message_text": "Location: 0.3136, 32.5811",
+      "last_message_type": "location",
+      "last_message_timestamp": "2026-11-18T14:57:41.785843Z"
+    },
+    "status": "active",
+    "metadata": {},
+    "username": null,
+    "created_at": "2026-11-18T11:52:00-03:00",
+    "updated_at": "2026-11-18T11:57:41-03:00",
+    "contact_name": "Test Sender",
+    "phone_number": "256772123456",
+    "last_active_at": "2026-11-18T11:57:41-03:00",
+    "phone_number_id": "597907523413541",
+    "business_scoped_user_id": "UG.1000000000000001",
+    "parent_business_scoped_user_id": null
+  },
+  "phone_number_id": "597907523413541",
+  "is_new_conversation": false
+}
