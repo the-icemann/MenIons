@@ -236,6 +236,9 @@ Where the brief was ambiguous or silent, this is what was chosen.
 
 **Plans**
 
+- Every plan runs a full period from the moment it is approved, never to midnight: a daily plan
+  for 24 hours (bought 18:30, it ends 18:30 the next day, so evening drops can be booked next
+  morning), a weekly plan for 7 days, a monthly plan to the same time next month.
 - "1 calendar month" means the same day and time next month, clamped to the month's last day
   (bought 31 January, ends 28 February).
 - A plan starts when the admin approves the request, not when the merchant claims payment.
