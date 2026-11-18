@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import orders, plans, receipts
 from app.bots import effects
+from app.bots import merchant as merchant_bot
 from app.bots.common import STATUS_LABELS, box, ctx, go, local_phone, parse_ugx, ugx, when
 from app.clock import kampala_date
 from app.config import get_settings
@@ -145,12 +146,15 @@ def cmd_approve(session, admin, args, event):
         return f"{request.momo_reference} was already approved."
     merchant = session.get(Merchant, request.merchant_id)
     plan = plans.get_plan(request.plan)
-    box(session).text(
-        merchant.phone,
-        f"🎉 Payment received! Your *{plan.name}* plan is active: {plan.drops} drops until {when(merchant.plan_ends)}.\n\n"
-        "Send *menu* to book your first delivery.",
-    )
     effects.send_receipts(session, [receipt], plan.name)
+    # Straight into the menu, so the merchant can book right away.
+    conversation = session.get(Conversation, merchant.phone) or Conversation(phone=merchant.phone, role="merchant")
+    session.add(conversation)
+    merchant_bot.show_menu(
+        session, conversation, merchant,
+        f"🎉 Payment received! Your *{plan.name}* plan is active: {plan.drops} drops until {when(merchant.plan_ends)}.",
+        now=event.received_at,
+    )  # fmt: skip
     return (
         f"✅ Approved {request.momo_reference}: {merchant.shop_name} now on {plan.name}. Receipt {receipt.number} sent."
     )

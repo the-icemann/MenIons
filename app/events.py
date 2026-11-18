@@ -49,6 +49,14 @@ class LocationShared(InboundEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ContactShared(InboundEvent):
+    """A contact card sent from the phone's address book (📎 → Contact)."""
+
+    phone: str
+    contacts: list[tuple[str, list[str]]]  # (name, [phone numbers as given])
+
+
+@dataclass(frozen=True, kw_only=True)
 class MediaReceived(InboundEvent):
     phone: str
     kind: str  # image | video | audio | document | sticker

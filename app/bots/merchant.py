@@ -27,7 +27,7 @@ from app.bots.common import (
     when,
 )
 from app.config import get_settings
-from app.events import InboundEvent, LocationShared
+from app.events import ContactShared, InboundEvent, LocationShared
 from app.models import (
     EXPECTED_DAILY_DROPS,
     Conversation,
@@ -298,11 +298,12 @@ def handle_merchant_pending(session: Session, event: InboundEvent, conversation:
 # --- Active merchants ------------------------------------------------------------------
 
 
-def show_menu(session: Session, conversation: Conversation, merchant: Merchant, intro: str = "") -> None:
+def show_menu(
+    session: Session, conversation: Conversation, merchant: Merchant, intro: str = "", now: datetime | None = None
+) -> None:
     clear(conversation)
-    drops = (
-        f"{merchant.drops_left} drops left" if plans.has_drop(merchant, _now(conversation)) else "no drops available"
-    )
+    has_drop = plans.has_drop(merchant, now or _now(conversation))
+    drops = f"{merchant.drops_left} drops left" if has_drop else "no drops available"
     rows = [
         {"id": "m:book", "title": "Book a delivery", "description": "Send a parcel to a customer"},
         {"id": "m:orders", "title": "My orders", "description": "Where are my parcels?"},
@@ -328,8 +329,56 @@ def _start_booking(session: Session, conversation: Conversation, merchant: Merch
         box(session).buttons(conversation.phone, REFUSALS[refusal] + " Buy a plan to keep booking.", buttons)
         return
     go(conversation, "book:name")
+    how = (
+        "📦 *New delivery.* Who is it for?\n\n"
+        "• Share their contact: 📎 → *Contact*\n"
+        "• Or type the *customer's name*"
+    )
+    recent = _recent_customers(session, merchant)
+    if recent:
+        rows = [
+            {"id": f"cust:{o.id}", "title": short(o.customer_name, 24), "description": local_phone(o.customer_phone)}
+            for o in recent
+        ]
+        box(session).list(
+            conversation.phone, how + "\n• Or pick a recent customer below", "Recent customers",
+            [{"title": "Recent customers", "rows": rows}],
+        )  # fmt: skip
+    else:
+        box(session).text(conversation.phone, how + "\n\n(Send *menu* any time to stop.)")
+
+
+def _recent_customers(session: Session, merchant: Merchant, limit: int = 9) -> list[Order]:
+    """The newest order for each of the shop's latest distinct customers."""
+    seen: dict[str, Order] = {}
+    for order in session.execute(
+        select(Order).where(Order.merchant_id == merchant.id).order_by(Order.id.desc()).limit(100)
+    ).scalars():
+        if order.customer_phone not in seen:
+            seen[order.customer_phone] = order
+            if len(seen) == limit:
+                break
+    return list(seen.values())
+
+
+def _from_contact(event: InboundEvent) -> tuple[str, str | None] | None:
+    """(name, phone) from a shared contact card; phone is None if no number is a Ugandan mobile."""
+    if not isinstance(event, ContactShared) or not event.contacts:
+        return None
+    name, numbers = event.contacts[0]
+    for number in numbers:
+        try:
+            return name, normalize_phone(number)
+        except InvalidPhone:
+            continue
+    return name, None
+
+
+def _ask_package(session: Session, conversation: Conversation, name: str, customer_phone: str) -> None:
+    go(conversation, "book:package", name=name, phone=customer_phone)
     box(session).text(
-        conversation.phone, "📦 New delivery. What is the *customer's name*?\n\n(Send *menu* any time to stop.)"
+        conversation.phone,
+        f"👤 {name}, {local_phone(customer_phone)}\n\nWhat are you sending? (for example: _2 dresses in a black bag_)",
     )
 
 
@@ -352,19 +401,40 @@ def _booking_step(
     out = box(session)
 
     if step == "book:name":
+        contact = _from_contact(event)
+        if choice.startswith("cust:"):
+            past = session.get(Order, int(choice[5:])) if choice[5:].isdigit() else None
+            if past is not None and past.merchant_id == merchant.id:
+                _ask_package(session, conversation, past.customer_name, past.customer_phone)
+                return
+        if contact:
+            name, customer_phone = contact
+            name = name or "Customer"
+            if customer_phone:
+                _ask_package(session, conversation, name, customer_phone)
+            else:
+                go(conversation, "book:phone", name=name)
+                out.text(
+                    phone,
+                    f"That contact has no Ugandan mobile number. Type {name}'s *phone number* (e.g. 0772 123456).",
+                )
+            return
         if not 2 <= len(text) <= 80:
-            out.text(phone, "Please type the customer's name.")
+            out.text(phone, "Please type the customer's name, or share their contact (📎 → Contact).")
             return
         go(conversation, "book:phone", name=text)
-        out.text(phone, f"{text}'s *phone number*? (for example 0772 123456)")
+        out.text(phone, f"{text}'s *phone number*? (for example 0772 123456), or share their contact.")
     elif step == "book:phone":
+        contact = _from_contact(event)
         try:
-            customer_phone = normalize_phone(text)
+            if contact and contact[1]:
+                customer_phone = contact[1]
+            else:
+                customer_phone = normalize_phone(text)
         except InvalidPhone:
             out.text(phone, "That doesn't look like a Ugandan mobile number. Try again, like 0772 123456.")
             return
-        go(conversation, "book:package", phone=customer_phone)
-        out.text(phone, "What are you sending? (for example: _2 dresses in a black bag_)")
+        _ask_package(session, conversation, ctx(conversation).get("name") or "Customer", customer_phone)
     elif step == "book:package":
         if not 2 <= len(text) <= 200:
             out.text(phone, "Please describe the package briefly.")

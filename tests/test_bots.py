@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app import messaging, plans, router
 from app.config import get_settings
-from app.events import ButtonReply, ListReply, LocationShared, MediaReceived, TextMessage
+from app.events import ButtonReply, ContactShared, ListReply, LocationShared, MediaReceived, TextMessage
 from app.messaging import Outgoing, deliver, take_outbox
 from app.models import (
     AdminAlert,
@@ -63,6 +63,10 @@ def pick(session, sender, row_id):
 
 def pin(session, sender, lat=0.3136, lng=32.5811):
     return talk(session, LocationShared(lat=lat, lng=lng, **_base(sender)))
+
+
+def contact(session, sender, name, *numbers):
+    return talk(session, ContactShared(contacts=[(name, list(numbers))], **_base(sender)))
 
 
 def photo(session, sender):
@@ -234,6 +238,60 @@ def test_a_suspended_merchant_is_told_and_not_onboarded(session):
     merchant = make_merchant(session, status=MerchantStatus.SUSPENDED)
     out = say(session, merchant.phone, "hi")
     assert "suspended" in body(out) and not buttons(out, merchant.phone)
+
+
+def test_booking_from_a_shared_contact(session):
+    merchant = make_merchant(session)
+    tap(session, merchant.phone, "m:book")
+    out = contact(session, merchant.phone, "Sarah Nakato", "+256 701 234567")
+    assert "Sarah Nakato, 0701 234567" in body(out) and "What are you sending" in body(out)
+    conversation = session.get(Conversation, merchant.phone)
+    assert (conversation.step, conversation.context["phone"]) == ("book:package", "+256701234567")
+
+
+def test_a_contact_without_a_ugandan_number_asks_for_one(session):
+    merchant = make_merchant(session)
+    tap(session, merchant.phone, "m:book")
+    assert "no Ugandan mobile" in body(contact(session, merchant.phone, "Wanjiku", "+254 712 345678"))
+    out = contact(session, merchant.phone, "Wanjiku", "0772 000111")
+    assert "What are you sending" in body(out)
+    assert session.get(Conversation, merchant.phone).context["name"] == "Wanjiku"
+
+
+def test_booking_for_a_recent_customer(session):
+    merchant, other = make_merchant(session), make_merchant(session)
+    first = book(session, merchant, customer_name="Sarah N", customer_phone="0701111111")
+    book(session, merchant, customer_name="Sarah N", customer_phone="0701111111")
+    book(session, merchant, customer_name="Paul K", customer_phone="0702222222")
+    stranger = book(session, other, customer_name="Not Mine")
+    out = tap(session, merchant.phone, "m:book")
+    assert rows(out, merchant.phone) == [f"cust:{first.id + 2}", f"cust:{first.id + 1}"]  # newest first, one each
+    tap(session, merchant.phone, f"cust:{stranger.id}")  # another shop's customer is ignored
+    assert session.get(Conversation, merchant.phone).step == "book:name"
+    out = pick(session, merchant.phone, f"cust:{first.id}")
+    assert "Sarah N, 0701 111111" in body(out)
+
+
+def test_customers_get_an_arrival_estimate(session):
+    merchant, rider = make_merchant(session, pickup_lat=0.3136, pickup_lng=32.5811), make_rider(session)
+    order = book(session, merchant)
+    out = pin(session, order.customer_phone, 0.3355, 32.5960)
+    assert "Estimated arrival: about 20–40 min" in body(out, order.customer_phone)
+    tap(session, rider.phone, f"acc:{order.id}")
+    tap(session, rider.phone, f"pu:{order.id}")
+    out = photo(session, rider.phone)
+    assert "Expected in about 5–15 min" in body(out, order.customer_phone)
+
+
+def test_approval_opens_the_menu(session):
+    merchant = make_merchant(session, plan=None, status=MerchantStatus.PENDING)
+    say(session, merchant.phone, "hi")
+    request = plans.create_plan_request(session, merchant, "weekly_gold", at=T0)
+    out = say(session, ADMIN, f"/approve {request.momo_reference} FDN-1 VC-1")
+    assert "m:book" in rows(out, merchant.phone)
+    assert "Payment received" in body(out, merchant.phone) and "20 drops left" in str(
+        to(out, merchant.phone)[-1].sections
+    )
 
 
 # --- Riders --------------------------------------------------------------------------------
