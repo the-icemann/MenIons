@@ -1,0 +1,15 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages", "value": {
+    "messaging_product": "whatsapp",
+    "metadata": {"display_phone_number": "256700000099", "phone_number_id": "PHONE_NUMBER_ID"},
+    "contacts": [{"profile": {"name": "Kisementi Threads"}, "wa_id": "256772123456"}],
+    "messages": [{
+      "from": "256772123456", "id": "wamid.CONTACT001", "timestamp": "1762765200", "type": "contacts",
+      "contacts": [{
+        "name": {"formatted_name": "Sarah Nakato", "first_name": "Sarah", "last_name": "Nakato"},
+        "phones": [{"phone": "+256 701 234567", "wa_id": "256701234567", "type": "CELL"}]
+      }]
+    }]
+  }}]}]
+}

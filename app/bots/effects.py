@@ -11,6 +11,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import eta
 from app.bots.common import box, chat_link, local_phone, maps_link, receipt_link, ugx
 from app.config import get_settings
 from app.models import AdminAlert, Merchant, Order, Receipt, Rider
@@ -39,6 +40,14 @@ def job_card(order: Order, merchant: Merchant) -> str:
     if order.notes:
         lines.append(f"Notes: {order.notes}")
     return "\n".join(line for line in lines if line.strip())
+
+
+def arrival(order: Order, merchant: Merchant, *, picked_up: bool) -> str:
+    """'about 20–40 min', or '' if a pin is missing."""
+    minutes = eta.estimate_minutes(
+        (merchant.pickup_lat, merchant.pickup_lng), (order.drop_lat, order.drop_lng), picked_up=picked_up
+    )
+    return eta.describe(minutes)
 
 
 def customer_location_request(order: Order, merchant: Merchant) -> str:
@@ -138,15 +147,17 @@ def run(session: Session, effects: list[SideEffect], actor_phone: str | None = N
 
         elif kind == "notify_customer_picked_up":
             if rider:
+                eta_text = arrival(order, merchant, picked_up=True)
+                expect = f"\nExpected in {eta_text}." if eta_text else ""
                 tell(
                     order.customer_phone,
                     f"📦 Your parcel from {merchant.shop_name} ({order.code}) is on the way with "
-                    f"{rider.name}, {local_phone(rider.phone)}.\n\n"
+                    f"{rider.name}, {local_phone(rider.phone)}.{expect}\n\n"
                     f"Your delivery code is *{order.drop_code}*. Give it to the rider only once you have the parcel.",
                 )
                 tell(
                     merchant.phone,
-                    f"📦 {order.code} picked up by {rider.name}, on the way to {order.customer_name}.",
+                    f"📦 {order.code} picked up by {rider.name}, on the way to {order.customer_name}.{expect}",
                     optional=True,
                 )
 

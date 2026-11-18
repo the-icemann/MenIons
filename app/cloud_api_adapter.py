@@ -15,6 +15,7 @@ from typing import Any
 from app.clock import utcnow
 from app.events import (
     ButtonReply,
+    ContactShared,
     FlowSubmit,
     InboundEvent,
     ListReply,
@@ -68,6 +69,15 @@ def _message(msg: dict[str, Any], at: datetime) -> InboundEvent:
             address=loc.get("address"),
             **base,
         )
+
+    if kind == "contacts":
+        cards = []
+        for card in msg["contacts"]:
+            name = (card.get("name") or {}).get("formatted_name") or (card.get("name") or {}).get("first_name") or ""
+            # wa_id is the WhatsApp number in digits; prefer it to the free-text phone field.
+            numbers = [p.get("wa_id") or p.get("phone") or "" for p in card.get("phones") or []]
+            cards.append((name.strip(), [n for n in numbers if n]))
+        return ContactShared(phone=phone, contacts=cards, **base)
 
     if kind in MEDIA_TYPES:
         media = msg[kind]

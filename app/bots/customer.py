@@ -55,6 +55,11 @@ def _status_text(session: Session, order: Order) -> str:
         lines.append(f"Rider: {rider.name}, {local_phone(rider.phone)}.")
     if order.cod_ugx:
         lines.append(f"Cash to pay on delivery: {ugx(order.cod_ugx)}.")
+    eta_text = effects.arrival(order, merchant, picked_up=order.status == S.PICKED_UP)
+    if order.status in (S.READY, S.ASSIGNED) and eta_text:
+        lines.append(f"Estimated arrival: {eta_text}.")
+    elif order.status == S.PICKED_UP and eta_text:
+        lines.append(f"From the shop it usually takes {eta_text}.")
     if order.status in (S.READY, S.ASSIGNED, S.PICKED_UP):
         lines.append(f"Your delivery code is *{order.drop_code}*. Give it to the rider only once you have the parcel.")
     return "\n".join(lines)
@@ -84,9 +89,11 @@ def handle_customer(session: Session, event: InboundEvent, conversation: Convers
             out.text(phone, _status_text(session, order))
             return
         go(conversation, "c:directions", order_id=order.id)
+        eta_text = effects.arrival(order, merchant, picked_up=False)
+        expect = f" Estimated arrival: {eta_text}." if eta_text else ""
         out.text(
             phone,
-            f"📍 Thank you! We're finding a rider for {order.code}.\n\n"
+            f"📍 Thank you! We're finding a rider for {order.code}.{expect}\n\n"
             f"Your delivery code is *{order.drop_code}*. Give it to the rider only once you have the parcel.\n\n"
             "To help the rider, you can type directions now (landmark, gate colour, floor).",
         )

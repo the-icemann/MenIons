@@ -18,8 +18,8 @@ the customer of an open order, or anyone else.
 | --- | --- |
 | Anyone new | Register a shop: name, owner, what they sell, daily volume, pickup pin and landmark. Then choose a plan |
 | Pending merchant | Pay for the plan by Mobile Money with a reference, tap *I've paid*, wait for approval |
-| Merchant | Menu: book a delivery, my orders, cancel an order, my plan, buy or renew, help |
-| Customer | Shares the delivery location (that makes the order READY), adds directions, asks for status. Gets the 4-digit drop code |
+| Merchant | Menu (opens by itself on approval): book a delivery, my orders, cancel an order, my plan, buy or renew, help. The customer is picked from recent customers, shared as a contact card (📎 → Contact), or typed |
+| Customer | Shares the delivery location (that makes the order READY), adds directions, asks for status. Gets the 4-digit drop code and an arrival estimate (`app/eta.py`: straight-line distance, a road factor and boda speeds; a range, not live traffic) |
 | Rider | Goes on and off shift, accepts job offers (first tap wins), sends a pickup photo, then a delivery photo and the customer's code; or reports a failed delivery. Confirms cash handovers |
 | Admin (`ADMIN_PHONES`) | Commands starting with `/`: approve payments (with the EFRIS FDN and code), add riders, assign, reschedule, cancel, unlock, record cash, suspend. Send `/help` |
 

@@ -116,3 +116,14 @@ def test_messages_and_statuses_in_one_payload_and_a_foreign_sender():
     message, status = parse(payload, AT)
     assert message.phone == "+254712345678"
     assert isinstance(status, StatusUpdate) and status.status == "read"
+
+
+def test_contact_card():
+    from app.events import ContactShared
+
+    assert one("contacts") == ContactShared(
+        provider_message_id="wamid.CONTACT001",
+        received_at=AT,
+        phone=SENDER,
+        contacts=[("Sarah Nakato", ["256701234567"])],
+    )
