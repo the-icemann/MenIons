@@ -1,16 +1,17 @@
-"""Riders: shifts, accepting jobs, pickup and delivery with photos and the drop code."""
+"""Riders: shifts, accepting jobs, pickup and delivery with photos and the drop code.
+Riders never handle the customer's money: payment is between merchant and customer."""
 
 from __future__ import annotations
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import orders, receipts
+from app import orders
 from app.bots import effects
-from app.bots.common import box, choice_of, clear, ctx, go, is_reset, local_phone, short, step_of, text_of, ugx
+from app.bots.common import box, choice_of, clear, ctx, go, is_reset, local_phone, short, step_of, text_of
 from app.events import InboundEvent, MediaReceived
 from app.messaging import save_media
-from app.models import CashHandover, Conversation, Media, Merchant, Order, OrderStatus, Rider
+from app.models import Conversation, Media, Merchant, Order, OrderStatus, Rider
 from app.orders import DropCodeRejected, InvalidTransition, TransitionConditionFailed
 
 S = OrderStatus
@@ -47,9 +48,8 @@ def _available(session: Session, conversation: Conversation, rider: Rider) -> No
     rows = []
     for order in ready:
         merchant = session.get(Merchant, order.merchant_id)
-        collect = ugx(order.cod_ugx) if order.cod_ugx else "no cash"
         rows.append({"id": f"acc:{order.id}", "title": order.code,
-                     "description": short(f"{merchant.shop_name} → {order.customer_name} · {collect}", 72)})  # fmt: skip
+                     "description": short(f"{merchant.shop_name} → {order.customer_name} · {order.package}", 72)})  # fmt: skip
     box(session).list(
         conversation.phone, "Jobs waiting. Pick one to accept it:", "See jobs", [{"title": "Jobs", "rows": rows}]
     )
@@ -119,10 +119,9 @@ def _photo_step(session: Session, event: InboundEvent, conversation: Conversatio
             show_menu(session, conversation, rider, f"{order.code} can't be marked picked up now.")
             return
         clear(conversation)
-        collect = f"Collect {ugx(order.cod_ugx)} from the customer." if order.cod_ugx else "No cash to collect."
         out.buttons(
             phone,
-            f"✅ {order.code} picked up. Deliver to {order.customer_name}, {local_phone(order.customer_phone)}.\n{collect}",
+            f"✅ {order.code} picked up. Deliver to {order.customer_name}, {local_phone(order.customer_phone)}.",
             _next_buttons(order),
         )
         effects.run(session, side_effects, actor_phone=phone)
@@ -175,8 +174,7 @@ def _code_step(session: Session, event: InboundEvent, conversation: Conversation
         show_menu(session, conversation, rider, f"{order.code} can't be marked delivered now.")
         return
     clear(conversation)
-    cash = f" Keep the {ugx(order.cod_ugx)} safe for the office." if order.cod_ugx else ""
-    show_menu(session, conversation, rider, f"🎉 {order.code} delivered. Well done!{cash}")
+    show_menu(session, conversation, rider, f"🎉 {order.code} delivered. Well done!")
     effects.run(session, side_effects, actor_phone=phone)
 
 
@@ -206,16 +204,6 @@ def _fail(session: Session, event: InboundEvent, conversation: Conversation, rid
         session, conversation, rider, f"Noted: {order.code} not delivered. Please bring the parcel back to the office."
     )
     effects.run(session, side_effects, actor_phone=phone)
-
-
-def _confirm_cash(session: Session, event: InboundEvent, conversation: Conversation, rider: Rider, raw_id: str) -> None:
-    handover = session.get(CashHandover, int(raw_id)) if raw_id.isdigit() else None
-    if handover is None or handover.rider_id != rider.id:
-        show_menu(session, conversation, rider)
-        return
-    issued = receipts.confirm_cash_handover(session, handover, at=event.received_at)
-    show_menu(session, conversation, rider, f"✅ Confirmed: you handed in {ugx(handover.received_ugx)}.")
-    effects.send_receipts(session, issued, f"cash on {handover.date:%d %b}")
 
 
 def handle_rider(session: Session, event: InboundEvent, conversation: Conversation) -> None:
@@ -258,9 +246,6 @@ def handle_rider(session: Session, event: InboundEvent, conversation: Conversati
         return
     if choice.startswith(("fl:", "fr:")):
         _fail(session, event, conversation, rider, choice)
-        return
-    if choice.startswith("cash:"):
-        _confirm_cash(session, event, conversation, rider, choice[5:])
         return
 
     step = step_of(conversation, "r:")

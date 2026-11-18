@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app import orders
 from app.bots import effects
-from app.bots.common import STATUS_LABELS, box, clear, ctx, go, local_phone, step_of, text_of, ugx
+from app.bots.common import STATUS_LABELS, box, clear, ctx, go, local_phone, step_of, text_of
 from app.events import InboundEvent, LocationShared
 from app.models import Conversation, Merchant, Order, OrderStatus, Rider
 from app.orders import InvalidTransition, TransitionConditionFailed
@@ -53,8 +53,6 @@ def _status_text(session: Session, order: Order) -> str:
     if order.rider_id:
         rider = session.get(Rider, order.rider_id)
         lines.append(f"Rider: {rider.name}, {local_phone(rider.phone)}.")
-    if order.cod_ugx:
-        lines.append(f"Cash to pay on delivery: {ugx(order.cod_ugx)}.")
     eta_text = effects.arrival(order, merchant, picked_up=order.status == S.PICKED_UP)
     if order.status in (S.READY, S.ASSIGNED) and eta_text:
         lines.append(f"Estimated arrival: {eta_text}.")

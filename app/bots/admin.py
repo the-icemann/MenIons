@@ -6,16 +6,14 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
-from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import orders, plans, receipts
+from app import orders, plans
 from app.bots import effects
 from app.bots import merchant as merchant_bot
-from app.bots.common import STATUS_LABELS, box, ctx, go, local_phone, parse_ugx, ugx, when
-from app.clock import kampala_date
+from app.bots.common import STATUS_LABELS, box, ctx, go, local_phone, ugx, when
 from app.config import get_settings
 from app.events import InboundEvent
 from app.models import (
@@ -33,7 +31,6 @@ from app.models import (
 from app.orders import InvalidTransition, TransitionConditionFailed
 from app.phones import InvalidPhone, normalize_phone
 from app.plans import PlanError
-from app.receipts import ReceiptError
 
 S = OrderStatus
 
@@ -49,7 +46,6 @@ HELP = """*Admin commands*
 /riders
 /rider add 0772123456 Name
 /rider remove 0772123456
-/cash 0772123456 85000: record cash a rider handed in today
 /merchants
 /suspend 0772123456  /activate 0772123456
 /alerts: latest alerts"""
@@ -274,31 +270,6 @@ def cmd_rider(session, admin, args, event):
     raise CommandError("usage: /rider add PHONE NAME  or  /rider remove PHONE")
 
 
-def cmd_cash(session, admin, args, event):
-    _need(args, 2, "/cash RIDER-PHONE AMOUNT [YYYY-MM-DD]")
-    rider = _rider_by_phone(session, args[0])
-    amount = parse_ugx(args[1])
-    if amount is None:
-        raise CommandError(f"{args[1]} is not an amount")
-    try:
-        day = date.fromisoformat(args[2]) if len(args) > 2 else kampala_date(event.received_at)
-    except ValueError:
-        raise CommandError("date must look like 2026-11-18") from None
-    try:
-        handover = receipts.record_cash_handover(session, rider, day, amount, admin, at=event.received_at)
-    except ReceiptError as exc:
-        raise CommandError(str(exc)) from None
-    box(session).buttons(
-        rider.phone,
-        f"💵 The office recorded *{ugx(amount)}* received from you for {day:%d %b}"
-        f" (your deliveries: {ugx(handover.expected_ugx)}). Tap *Confirm* if that's right.",
-        [(f"cash:{handover.id}", "Confirm")],
-    )
-    diff = handover.difference_ugx
-    note = "" if diff == 0 else f" ⚠️ Difference: {ugx(diff) if diff > 0 else '-' + ugx(-diff)}."
-    return f"Recorded {ugx(amount)} from {rider.name} (expected {ugx(handover.expected_ugx)}).{note} Waiting for the rider to confirm."
-
-
 def cmd_merchants(session, admin, args, event):
     rows = session.execute(select(Merchant).order_by(Merchant.id).limit(40)).scalars().all()
     if not rows:
@@ -352,7 +323,6 @@ COMMANDS: dict[str, Callable] = {
     "unlock": cmd_unlock,
     "riders": cmd_riders,
     "rider": cmd_rider,
-    "cash": cmd_cash,
     "merchants": cmd_merchants,
     "suspend": cmd_suspend,
     "activate": cmd_activate,

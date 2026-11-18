@@ -12,7 +12,6 @@ from app.events import ButtonReply, ContactShared, ListReply, LocationShared, Me
 from app.messaging import Outgoing, deliver, take_outbox
 from app.models import (
     AdminAlert,
-    CashHandover,
     Conversation,
     Media,
     Merchant,
@@ -99,7 +98,7 @@ def rows(out, who):
 # --- The whole journey -------------------------------------------------------------------
 
 
-def test_from_first_hello_to_delivered_and_cash_handed_in(session):
+def test_from_first_hello_to_delivered(session):
     shop, customer, rider_phone = phone(), phone(), phone()
 
     # Onboarding
@@ -148,13 +147,13 @@ def test_from_first_hello_to_delivered_and_cash_handed_in(session):
     tap(session, shop, "m:book")
     say(session, shop, "Sarah N")
     say(session, shop, "0" + customer[4:])
-    say(session, shop, "2 dresses in a black bag")
-    say(session, shop, "85,000")
+    out = say(session, shop, "2 dresses in a black bag")
+    assert "notes" in body(out) and "cash" not in body(out).lower()  # we only deliver; no money step
     out = tap(session, shop, "notes:none")
-    assert "UGX 85,000" in body(out) and "1 of your 20 drops" in body(out)
+    assert "1 of your 20 drops" in body(out) and "UGX" not in body(out)
     out = tap(session, shop, "book:yes")
     order = session.execute(select(Order).where(Order.merchant_id == merchant.id)).scalar_one()
-    assert (order.status, order.cod_ugx, order.customer_phone) == (S.BOOKED, 85_000, customer)
+    assert (order.status, order.cod_ugx, order.customer_phone) == (S.BOOKED, 0, customer)
     assert f"https://wa.me/256700000099?text={order.code}" in body(out, shop)
     assert "Booking confirmation" in body(out, shop)
     assert to(out, customer)[0].optional  # likely outside the window; the link is the real path
@@ -184,13 +183,8 @@ def test_from_first_hello_to_delivered_and_cash_handed_in(session):
     assert order.status == S.DELIVERED
     assert {m.phone for m in out if m.receipt_id} == {shop, customer, rider_phone}
     assert session.scalar(select(Media.id).where(Media.order_id == order.id, Media.kind == "delivery"))
-
-    # Cash handover
-    out = say(session, ADMIN, f"/cash {rider_phone} 85000 {order.updated_at.date().isoformat()}")
-    handover = session.execute(select(CashHandover).where(CashHandover.rider_id == rider.id)).scalar_one()
-    assert (f"cash:{handover.id}", "Confirm") in buttons(out, rider_phone)
-    out = tap(session, rider_phone, f"cash:{handover.id}")
-    assert handover.rider_confirmed_at is not None and any(m.receipt_id for m in to(out, rider_phone))
+    for receipt in session.execute(select(Receipt).where(Receipt.order_id == order.id)).scalars():
+        assert receipt.amount_ugx is None and "Cash" not in str(receipt.snapshot)
 
 
 # --- Merchants -----------------------------------------------------------------------------
@@ -221,17 +215,15 @@ def test_booking_without_drops_offers_a_plan(session):
     assert session.scalar(select(Order.id).where(Order.merchant_id == merchant.id)) is None
 
 
-def test_booking_rejects_a_bad_phone_and_amount(session):
+def test_booking_rejects_a_bad_phone(session):
     merchant = make_merchant(session)
     tap(session, merchant.phone, "m:book")
     say(session, merchant.phone, "Sarah")
     assert "doesn't look like" in body(say(session, merchant.phone, "12345"))
     say(session, merchant.phone, "0772 123 456")
-    say(session, merchant.phone, "shoes")
-    assert "as a number" in body(say(session, merchant.phone, "a lot"))
-    assert "notes" in body(say(session, merchant.phone, "85k"))
+    assert "notes" in body(say(session, merchant.phone, "shoes"))
     conversation = session.get(Conversation, merchant.phone)
-    assert conversation.context["cod"] == 85_000
+    assert conversation.context["phone"] == "+256772123456"
 
 
 def test_a_suspended_merchant_is_told_and_not_onboarded(session):
@@ -362,6 +354,7 @@ def test_admin_errors_are_explained(session):
     assert "3 parts" in reply and f"/approve {request.momo_reference} " in reply
     assert request.status == PlanRequestStatus.AWAITING_PAYMENT
     assert "Unknown command" in body(say(session, ADMIN, "/dance"))
+    assert "Unknown command" in body(say(session, ADMIN, "/cash 0772123456 5000"))  # riders don't handle money
     assert "/approve" in body(say(session, ADMIN, "/help"))
 
 
