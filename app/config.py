@@ -31,10 +31,38 @@ class Settings(BaseSettings):
     meta_app_secret: str = ""
     whatsapp_verify_token: str = ""
 
+    # Phones (comma-separated) whose messages starting with "/" are admin commands, and who
+    # get admin alerts on WhatsApp. Example: +256772000001,+256701000002
+    admin_phones: str = ""
+    # The business WhatsApp number in international digits (2567...), for click-to-chat links.
+    whatsapp_display_number: str = ""
+    # Where merchants send plan payments.
+    momo_pay_number: str = ""
+    momo_pay_name: str = ""
+    # An approved template with one body parameter, used to reach someone outside the
+    # 24-hour window. Empty: such messages are not sent and an admin alert is recorded.
+    whatsapp_update_template: str = ""
+    whatsapp_template_language: str = "en"
+    # Delivery and pickup photos are saved here.
+    media_dir: str = "var/media"
+
     company_name: str = "Men-Ions"
     company_tin: str = ""
     company_address: str = "Kampala, Uganda"
     company_phone: str = ""
+
+    @property
+    def admin_phone_list(self) -> list[str]:
+        from app.phones import InvalidPhone, normalize_wa_id
+
+        phones = []
+        for raw in self.admin_phones.split(","):
+            if raw.strip():
+                try:
+                    phones.append(normalize_wa_id(raw.strip()))
+                except InvalidPhone:
+                    pass
+        return phones
 
     @property
     def api_base(self) -> str:

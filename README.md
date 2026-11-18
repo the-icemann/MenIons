@@ -5,9 +5,47 @@ Kampala. Merchants book deliveries, customers share a location pin, and riders a
 complete jobs, all on WhatsApp. This service owns all the logic. WhatsApp access goes through
 Kapso using Meta's standard Cloud API format, and the provider can be swapped with settings only.
 
-**This is milestone 1: the foundation.** It has the data model, the order state machine, plans
-and drop accounting, hash-chained receipts, the webhook receiver and the outbound WhatsApp
-client. There are no conversation flows yet: the handlers in `app/router.py` only log.
+It has the data model, the order state machine, plans and drop accounting, hash-chained
+receipts, the webhook receiver, the outbound WhatsApp client, and the WhatsApp bots that run the
+service (milestone 2).
+
+## The bots
+
+Who answers is decided by the sender's phone: an active merchant, a pending merchant, a rider,
+the customer of an open order, or anyone else.
+
+| Who | What they can do |
+| --- | --- |
+| Anyone new | Register a shop: name, owner, what they sell, daily volume, pickup pin and landmark. Then choose a plan |
+| Pending merchant | Pay for the plan by Mobile Money with a reference, tap *I've paid*, wait for approval |
+| Merchant | Menu: book a delivery, my orders, cancel an order, my plan, buy or renew, help |
+| Customer | Shares the delivery location (that makes the order READY), adds directions, asks for status. Gets the 4-digit drop code |
+| Rider | Goes on and off shift, accepts job offers (first tap wins), sends a pickup photo, then a delivery photo and the customer's code; or reports a failed delivery. Confirms cash handovers |
+| Admin (`ADMIN_PHONES`) | Commands starting with `/`: approve payments (with the EFRIS FDN and code), add riders, assign, reschedule, cancel, unlock, record cash, suspend. Send `/help` |
+
+**Reaching the customer.** A customer has usually never written to us, so WhatsApp only allows
+an approved template. After booking, the merchant gets a click-to-chat link
+(`https://wa.me/<WHATSAPP_DISPLAY_NUMBER>?text=MNI-0001`) to send the customer; when the
+customer sends it, the 24-hour window opens and the bot asks for their location. If the
+number isn't set, the merchant is told to have the customer send the order code.
+
+**The 24-hour window.** Every message is queued while a webhook is handled and sent after the
+commit (`app/messaging.py`). Outside the window it goes through `WHATSAPP_UPDATE_TEMPLATE` if
+set; otherwise it is skipped and an `admin_alerts` row says what wasn't sent (courtesy notices
+are skipped quietly).
+
+**Testing with one phone.** The Kapso sandbox talks to one registered phone. Put that phone in
+`ADMIN_PHONES` and use `/as merchant`, `/as rider`, `/as customer`, `/as unknown` and `/as auto`
+to choose which bot answers your normal messages. `/as` is refused when `ENV=production`.
+A full run on one phone:
+
+1. Send `hi` and register a shop, choose a plan, tap *I've paid*.
+2. `/pending`, then `/approve <REF> TEST-FDN TEST-CODE`.
+3. `/rider add <your number> Your Name`, then `/as rider` and tap *Go on shift*.
+4. `/as merchant`, `menu`, book a delivery with your own number as the customer.
+5. `/as customer`, send anything, share a location. You get the drop code; the rider bot gets a job offer.
+6. `/as rider`: accept, *Picked up*, photo, *Delivered*, photo, type the code.
+7. `/cash <your number> <amount>`, then confirm as the rider.
 
 ## Setup
 
@@ -43,7 +81,7 @@ git-ignored.
 | --- | --- |
 | `ENV` | `development`, `test` or `production` |
 | `DATABASE_URL` | PostgreSQL URL, `postgresql+psycopg://user:pass@host:5432/db` |
-| `PUBLIC_BASE_URL` | Public address of this service (for receipt links in milestone 2) |
+| `PUBLIC_BASE_URL` | Public address of this service, used in receipt links. On the sandbox, the tunnel address |
 | `WHATSAPP_PROVIDER` | `fake` (default, sends nothing), `kapso` or `meta` |
 | `WHATSAPP_API_BASE` | Override the provider's base URL. Empty uses the default for the provider |
 | `WHATSAPP_PHONE_NUMBER_ID` | The WhatsApp phone number id to send from |
@@ -54,6 +92,11 @@ git-ignored.
 | `META_APP_SECRET` | Secret for `meta` signatures |
 | `WHATSAPP_VERIFY_TOKEN` | The token for Meta's webhook verification handshake |
 | `COMPANY_NAME`, `COMPANY_TIN`, `COMPANY_ADDRESS`, `COMPANY_PHONE` | Printed on every receipt |
+| `ADMIN_PHONES` | Comma-separated phones that can use `/` commands and get alerts on WhatsApp |
+| `WHATSAPP_DISPLAY_NUMBER` | The business number as digits (`2567...`), for click-to-chat links |
+| `MOMO_PAY_NUMBER`, `MOMO_PAY_NAME` | Where merchants pay for plans |
+| `WHATSAPP_UPDATE_TEMPLATE`, `WHATSAPP_TEMPLATE_LANGUAGE` | Approved template with one body parameter, for messages outside the 24-hour window |
+| `MEDIA_DIR` | Where pickup and delivery photos are saved (default `var/media`) |
 
 The app refuses to start when:
 
@@ -128,10 +171,12 @@ portal and types the FDN and verification code in when approving a plan purchase
 | `app/webhooks.py` | `POST /webhooks/whatsapp`: verify, store, de-duplicate, normalize, route |
 | `app/cloud_api_adapter.py`, `app/events.py` | Cloud API payload to normalized events |
 | `app/kapso_adapter.py` | Kapso's own webhook format (v2) to the same events. Inbound messages reuse the Cloud API message reader; `kapso.direction` decides message vs status, because Kapso marks inbound messages `status: delivered` |
-| `app/router.py` | Phone to role to handler (stubs), and `in_free_window()` |
+| `app/router.py` | Phone to role to bot, admin commands, `/as`, and `in_free_window()` |
+| `app/bots/` | The bots: `merchant.py` (onboarding, plans, booking), `customer.py`, `rider.py`, `admin.py`, and `effects.py`, which turns the state machine's side effects into messages |
+| `app/messaging.py` | The outbox, sending after commit, the 24-hour window and templates, saving photos |
 | `app/whatsapp/` | Provider protocol, the one Cloud API client, signature verifiers, the fake |
 
-Three rules milestone 2 must follow:
+Three rules the bots follow:
 
 1. **`transition()` never commits and never sends.** The caller commits, then performs the
    returned side effects (`notify_*`, `send_receipt`).
@@ -152,7 +197,7 @@ Where the brief was ambiguous or silent, this is what was chosen.
   `drop_code_reset` rows count wrong codes; they are not status changes.
 - **`webhook_events.kind`** (`message`, `status`, `unknown`).
 - **Admin identities are text** (`approved_by`, `paid_by`, `dispatcher_id`, admin `actor_id`).
-  There is no admin table in this milestone.
+  There is no admin table: admins are the phones in `ADMIN_PHONES`.
 - **`order_events` is append-only by trigger**, like `receipts`.
 - **`cod_payouts.momo_reference` is unique**, so one transfer can't be recorded twice.
 
