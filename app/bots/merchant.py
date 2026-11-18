@@ -178,7 +178,7 @@ def handle_unknown(session: Session, event: InboundEvent, conversation: Conversa
 
 def show_plans(session: Session, conversation: Conversation, merchant: Merchant) -> None:
     recommended = plans.recommend_plan(merchant.expected_daily_drops) if merchant.expected_daily_drops else None
-    period = {"day": "today only", "week": "7 days", "month": "1 month"}
+    period = {"day": "24 hours", "week": "7 days", "month": "1 month"}
     sections = []
     for title, keys in (
         ("Daily", ["daily_bronze", "daily_silver", "daily_gold"]),

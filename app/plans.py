@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -68,8 +68,9 @@ def plan_end(plan: Plan, at: datetime) -> datetime:
     """When a plan bought at `at` stops (exclusive)."""
     local = at.astimezone(KAMPALA)
     if plan.period == "day":
-        # Ends at midnight Kampala time on the day bought.
-        end = datetime.combine(local.date() + timedelta(days=1), time.min, tzinfo=KAMPALA)
+        # A full 24 hours from purchase, not midnight: drops left unused in the evening can
+        # still be booked first thing the next morning. Nobody loses drops overnight.
+        end = local + timedelta(hours=24)
     elif plan.period == "week":
         end = local + timedelta(days=7)
     else:

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -25,22 +25,22 @@ def test_catalogue_matches_the_brief():
     }
 
 
-def test_daily_plan_ends_at_kampala_midnight(session):
+def test_daily_plan_lasts_24_hours_from_purchase(session):
     bought = kampala(2026, 11, 10, 8, 30)
     merchant = make_merchant(session, plan="daily_silver", at=bought)
     assert merchant.drops_left == 3
-    assert merchant.plan_ends == kampala(2026, 11, 11, 0, 0)
-    assert plans.has_drop(merchant, kampala(2026, 11, 10, 23, 59))
-    assert not plans.has_drop(merchant, kampala(2026, 11, 11, 0, 0))
-    assert plans.drop_refusal(merchant, kampala(2026, 11, 11, 0, 0)) == "plan_expired"
-    # 23:59 Kampala is 20:59 UTC the same day: the UTC date must not decide it.
-    assert plans.has_drop(merchant, datetime(2026, 11, 10, 20, 59, tzinfo=UTC))
-    assert not plans.has_drop(merchant, datetime(2026, 11, 10, 21, 0, tzinfo=UTC))
+    assert merchant.plan_ends == kampala(2026, 11, 11, 8, 30)
+    assert plans.has_drop(merchant, kampala(2026, 11, 11, 7, 0))  # first thing next morning
+    assert not plans.has_drop(merchant, kampala(2026, 11, 11, 8, 30))
+    assert plans.drop_refusal(merchant, kampala(2026, 11, 11, 8, 30)) == "plan_expired"
 
 
-def test_daily_plan_bought_just_before_midnight_still_ends_at_midnight(session):
+def test_a_daily_plan_bought_in_the_evening_keeps_its_drops_overnight(session):
+    merchant = make_merchant(session, plan="daily_gold", at=kampala(2026, 11, 10, 18, 30))
+    assert merchant.plan_ends == kampala(2026, 11, 11, 18, 30)
+    assert plans.has_drop(merchant, kampala(2026, 11, 11, 9, 0))
     merchant = make_merchant(session, plan="daily_gold", at=kampala(2026, 11, 10, 23, 59))
-    assert merchant.plan_ends == kampala(2026, 11, 11, 0, 0)
+    assert merchant.plan_ends == kampala(2026, 11, 11, 23, 59)
 
 
 def test_weekly_is_seven_days_and_monthly_is_a_calendar_month():
