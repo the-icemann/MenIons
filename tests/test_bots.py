@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from app import messaging, router
+from app import messaging, plans, router
 from app.config import get_settings
 from app.events import ButtonReply, ListReply, LocationShared, MediaReceived, TextMessage
 from app.messaging import Outgoing, deliver, take_outbox
@@ -298,6 +298,11 @@ def test_only_admins_can_run_commands(session):
 def test_admin_errors_are_explained(session):
     assert "no order" in body(say(session, ADMIN, "/cancel MNI-9999"))
     assert "usage" in body(say(session, ADMIN, "/approve"))
+    merchant = make_merchant(session, plan=None, status=MerchantStatus.PENDING)
+    request = plans.create_plan_request(session, merchant, "weekly_gold", at=T0)
+    reply = body(say(session, ADMIN, f"/approve {request.momo_reference} 000gr"))
+    assert "3 parts" in reply and f"/approve {request.momo_reference} " in reply
+    assert request.status == PlanRequestStatus.AWAITING_PAYMENT
     assert "Unknown command" in body(say(session, ADMIN, "/dance"))
     assert "/approve" in body(say(session, ADMIN, "/help"))
 

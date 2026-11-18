@@ -127,8 +127,14 @@ def cmd_pending(session, admin, args, event):
 
 
 def cmd_approve(session, admin, args, event):
-    _need(args, 3, "/approve REF FDN VERIFICATION-CODE")
+    if not args:
+        raise CommandError("usage: /approve REF FDN VERIFICATION-CODE. Send /pending to see references.")
     request = _request(session, args[0])
+    if len(args) < 3:
+        raise CommandError(
+            f"approving needs 3 parts: the reference, then the EFRIS FDN and the EFRIS verification code "
+            f"from the receipt you issued on URA's portal. For example:\n/approve {request.momo_reference} 3245678901 ABC123"
+        )
     try:
         receipt = plans.approve_plan_request(
             session, request, admin, event.received_at, efris_fdn=args[1], efris_verification_code=args[2]
