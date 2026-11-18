@@ -277,7 +277,7 @@ def issue_for_transition(
     if to_status == OrderStatus.BOOKED:
         lines = _order_lines(order, merchant) + [
             ["Customer", f"{order.customer_name}, {order.customer_phone}"],
-            _cash_line(order),
+            *([_cash_line(order)] if order.cod_ugx else []),
             ["Booked", when],
             ["Drops left on plan", str(merchant.drops_left)],
         ]
@@ -315,7 +315,7 @@ def issue_for_transition(
                 ["Customer", f"{order.customer_name}, {order.customer_phone}"],
                 ["Rider", rider.name],
                 ["Delivered", when],
-                ["Cash collected for you", ugx(cod) if cod else "None"],
+                *([["Cash collected for you", ugx(cod)]] if cod else []),
             ],
             "notes": [f"The rider collected {ugx(cod)} on your behalf. Men-Ions pays it out to you."] if cod else [],
         },
@@ -331,7 +331,7 @@ def issue_for_transition(
             "lines": _order_lines(order, merchant)
             + [
                 ["Delivered", when],
-                ["Cash paid to rider", f"{ugx(cod)}, collected on behalf of {merchant.shop_name}" if cod else "None"],
+                *([["Cash paid to rider", f"{ugx(cod)}, collected on behalf of {merchant.shop_name}"]] if cod else []),
             ],
             "notes": [
                 f"{get_settings().company_name} delivered this parcel for {merchant.shop_name}."
@@ -349,7 +349,7 @@ def issue_for_transition(
         amount,
         {
             "lines": _order_lines(order, merchant)
-            + [["Delivered", when], ["Cash you collected", ugx(cod) if cod else "None"]],
+            + [["Delivered", when], *([["Cash you collected", ugx(cod)]] if cod else [])],
             "notes": ["Hand this cash to the dispatcher at the end of your shift."] if cod else [],
         },
         at=at,

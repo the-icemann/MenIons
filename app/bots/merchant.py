@@ -19,7 +19,6 @@ from app.bots.common import (
     go,
     is_reset,
     local_phone,
-    parse_ugx,
     short,
     step_of,
     text_of,
@@ -383,12 +382,10 @@ def _ask_package(session: Session, conversation: Conversation, name: str, custom
 
 
 def _booking_summary(c: dict, merchant: Merchant) -> str:
-    collect = ugx(c["cod"]) if c["cod"] else "Nothing (already paid)"
     return (
         "Please check this booking:\n"
         f"Customer: {c['name']}, {local_phone(c['phone'])}\n"
         f"Package: {c['package']}\n"
-        f"Rider collects: {collect}\n"
         f"Notes: {c.get('notes') or 'none'}\n\n"
         f"This uses 1 of your {merchant.drops_left} drops."
     )
@@ -439,19 +436,7 @@ def _booking_step(
         if not 2 <= len(text) <= 200:
             out.text(phone, "Please describe the package briefly.")
             return
-        go(conversation, "book:cod", package=text)
-        out.buttons(
-            phone,
-            "How much *cash should the rider collect* from the customer? Type the amount in UGX (e.g. 85000), "
-            "or tap *Already paid*.",
-            [("cod:0", "Already paid")],
-        )
-    elif step == "book:cod":
-        amount = 0 if choice == "cod:0" else parse_ugx(text)
-        if amount is None:
-            out.buttons(phone, "Please type the amount as a number, e.g. 85000.", [("cod:0", "Already paid")])
-            return
-        go(conversation, "book:notes", cod=amount)
+        go(conversation, "book:notes", package=text)
         out.buttons(
             phone, "Any *notes for the rider*? (e.g. fragile, call before coming)", [("notes:none", "No notes")]
         )
@@ -478,7 +463,7 @@ def _booking_step(
         try:
             order, side_effects = orders.create_order(
                 session, merchant, customer_name=c["name"], customer_phone=c["phone"], package=c["package"],
-                cod_ugx=c["cod"], notes=c.get("notes"), at=event.received_at,
+                notes=c.get("notes"), at=event.received_at,
             )  # fmt: skip
         except TransitionConditionFailed as exc:
             clear(conversation)
@@ -575,7 +560,8 @@ HELP = (
     "1. Book a delivery here (Menu → Book a delivery).\n"
     "2. Send your customer the link we give you. They share their location with us.\n"
     "3. A rider picks up from your shop and delivers. Your customer gives the rider a 4-digit code.\n"
-    "4. You get a receipt for every step. Cash collected for you is paid out by Mobile Money.\n\n"
+    "4. You get a receipt for every step.\n\n"
+    "We only deliver: payment for the goods is between you and your customer.\n\n"
     "Each delivery uses one drop from your plan. Cancelled before pickup? The drop comes back."
 )
 

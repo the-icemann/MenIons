@@ -20,8 +20,13 @@ the customer of an open order, or anyone else.
 | Pending merchant | Pay for the plan by Mobile Money with a reference, tap *I've paid*, wait for approval |
 | Merchant | Menu (opens by itself on approval): book a delivery, my orders, cancel an order, my plan, buy or renew, help. The customer is picked from recent customers, shared as a contact card (📎 → Contact), or typed |
 | Customer | Shares the delivery location (that makes the order READY), adds directions, asks for status. Gets the 4-digit drop code and an arrival estimate (`app/eta.py`: straight-line distance, a road factor and boda speeds; a range, not live traffic) |
-| Rider | Goes on and off shift, accepts job offers (first tap wins), sends a pickup photo, then a delivery photo and the customer's code; or reports a failed delivery. Confirms cash handovers |
-| Admin (`ADMIN_PHONES`) | Commands starting with `/`: approve payments (with the EFRIS FDN and code), add riders, assign, reschedule, cancel, unlock, record cash, suspend. Send `/help` |
+| Rider | Goes on and off shift, accepts job offers (first tap wins), sends a pickup photo, then a delivery photo and the customer's code; or reports a failed delivery |
+| Admin (`ADMIN_PHONES`) | Commands starting with `/`: approve payments (with the EFRIS FDN and code), add riders, assign, reschedule, cancel, unlock, suspend. Send `/help` |
+
+**We only deliver.** The bots never ask about, collect or pass on money for the goods: payment
+is between the merchant and the customer. (The cash-on-delivery columns, cash handovers and payouts
+from milestone 1 are still in the database and `app/receipts.py`, unused by the bots; receipts
+show no cash lines when no cash was collected.)
 
 **Reaching the customer.** A customer has usually never written to us, so WhatsApp only allows
 an approved template. After booking, the merchant gets a click-to-chat link
@@ -45,7 +50,6 @@ A full run on one phone:
 4. `/as merchant`, `menu`, book a delivery with your own number as the customer.
 5. `/as customer`, send anything, share a location. You get the drop code; the rider bot gets a job offer.
 6. `/as rider`: accept, *Picked up*, photo, *Delivered*, photo, type the code.
-7. `/cash <your number> <amount>`, then confirm as the rider.
 
 ## Setup
 

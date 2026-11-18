@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import eta
-from app.bots.common import box, chat_link, local_phone, maps_link, receipt_link, ugx
+from app.bots.common import box, chat_link, local_phone, maps_link, receipt_link
 from app.config import get_settings
 from app.models import AdminAlert, Merchant, Order, Receipt, Rider
 from app.orders import SideEffect
@@ -35,7 +35,6 @@ def job_card(order: Order, merchant: Merchant) -> str:
         f"Deliver to: {order.customer_name}, {local_phone(order.customer_phone)}",
         f"   {order.drop_text or ''}".rstrip(),
         f"   {maps_link(order.drop_lat, order.drop_lng)}",
-        f"Collect: {ugx(order.cod_ugx) if order.cod_ugx else 'nothing, already paid'}",
     ]
     if order.notes:
         lines.append(f"Notes: {order.notes}")
@@ -51,10 +50,9 @@ def arrival(order: Order, merchant: Merchant, *, picked_up: bool) -> str:
 
 
 def customer_location_request(order: Order, merchant: Merchant) -> str:
-    cash = f"\nCash to pay on delivery: {ugx(order.cod_ugx)}." if order.cod_ugx else ""
     return (
         f"Hi {order.customer_name} 👋 {merchant.shop_name} is sending you {order.package} "
-        f"with Men-Ions (order {order.code}).{cash}\n\n"
+        f"with Men-Ions (order {order.code}).\n\n"
         "Where should our rider bring it? Tap *Send location* and choose where you are, "
         "or 📎 → Location."
     )
@@ -112,11 +110,10 @@ def run(session: Session, effects: list[SideEffect], actor_phone: str | None = N
 
         elif kind == "notify_riders_job_available":
             riders = _riders_to_offer(session, merchant)
-            cash = ugx(order.cod_ugx) if order.cod_ugx else "nothing"
             text = (
                 f"🆕 Job {order.code}\nPick up: {merchant.shop_name}, {merchant.pickup_text or ''}\n"
                 f"Deliver: {order.drop_text or maps_link(order.drop_lat, order.drop_lng)}\n"
-                f"Package: {order.package}\nCollect: {cash}\n\nFirst to accept gets it."
+                f"Package: {order.package}\n\nFirst to accept gets it."
             )
             for r in riders:
                 box(session).buttons(r.phone, text, [(f"acc:{order.id}", "Accept job")], optional=True)
@@ -179,7 +176,7 @@ def run(session: Session, effects: list[SideEffect], actor_phone: str | None = N
 
 
 def send_receipts(session: Session, receipts: list[Receipt], about: str) -> None:
-    """For receipts not tied to an order (plan purchase, cash handover)."""
+    """For receipts not tied to an order (a plan purchase)."""
     for receipt in receipts:
         if receipt.recipient_phone:
             title = TITLES.get(receipt.type, "Receipt")
