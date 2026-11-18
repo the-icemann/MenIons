@@ -156,7 +156,8 @@ def save_media(media_id: str, name: str) -> str:
         data = get_provider().download_media(media_id)
         folder = Path(get_settings().media_dir)
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{name}.jpg"
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "photo"  # part of it comes from the webhook
+        path = folder / f"{safe}.jpg"
         path.write_bytes(data)
         return str(path)
     except Exception:  # noqa: BLE001
