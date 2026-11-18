@@ -24,6 +24,13 @@ os.environ.update(
     WHATSAPP_WEBHOOK_SIGNATURE="none",
     WHATSAPP_VERIFY_TOKEN="verify-me",
     COMPANY_NAME="Men-Ions",
+    ADMIN_PHONES="+256799999001",
+    WHATSAPP_DISPLAY_NUMBER="256700000099",
+    MOMO_PAY_NUMBER="0700000099",
+    MOMO_PAY_NAME="Men-Ions Ltd",
+    WHATSAPP_UPDATE_TEMPLATE="",
+    PUBLIC_BASE_URL="https://menions.test",
+    MEDIA_DIR="/tmp/menions-test-media",
 )
 
 from alembic import command  # noqa: E402

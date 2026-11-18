@@ -17,6 +17,7 @@ from app.clock import utcnow
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.events import InboundEvent, StatusUpdate, UnknownEvent
+from app.messaging import deliver, discard_outbox, outbox, take_outbox
 from app.models import WebhookEvent
 from app.whatsapp.signatures import get_verifier
 
@@ -89,6 +90,7 @@ def receive(
         raise HTTPException(status_code=413, detail="Body too large")
     if not get_verifier(settings)(body, request.headers):
         raise HTTPException(status_code=401, detail="Bad signature")
+    discard_outbox(session)  # start clean: nothing queued by earlier work on this session
 
     # 2. Store before doing anything else. One row per message or status in the payload,
     #    each holding the full request; a retried webhook hits the unique id and is skipped.
@@ -110,13 +112,20 @@ def receive(
 
     # 3. Route each new event. A handler error is saved on the row and we still answer 200,
     #    so the provider doesn't retry forever; the stored row is there to replay.
+    #    Replies are queued while handling and sent only after the commit (4.), so a
+    #    handler that fails sends nothing: its queued messages are dropped with its changes.
     for row_id, event in fresh:
+        queued = len(outbox(session).items)
         try:
             with session.begin_nested():
                 event_router.dispatch(session, event)
             session.execute(update(WebhookEvent).where(WebhookEvent.id == row_id).values(processed=True))
         except Exception as exc:  # noqa: BLE001
             log.exception("webhook event %s failed", row_id)
+            del outbox(session).items[queued:]
             session.execute(update(WebhookEvent).where(WebhookEvent.id == row_id).values(error=repr(exc)[:2000]))
         session.commit()
+
+    # 4. Send. Failures are recorded as admin alerts; the webhook still answers 200.
+    deliver(session, take_outbox(session))
     return {"status": "ok"}
