@@ -442,3 +442,10 @@ def test_a_handler_error_sends_nothing(session, client, fake_provider, monkeypat
     assert fake_provider.sent == []
     row = session.execute(select(Media)).first()
     assert row is None
+
+
+def test_photo_names_cannot_leave_the_media_folder(monkeypatch, tmp_path, fake_provider):
+    monkeypatch.setattr(get_settings(), "media_dir", str(tmp_path))
+    fake_provider.media["m1"] = b"jpeg"
+    saved = messaging.save_media("m1", "MNI-0001-pickup-../../etc/x")
+    assert saved.startswith(str(tmp_path)) and "/" not in saved.removeprefix(str(tmp_path) + "/")
