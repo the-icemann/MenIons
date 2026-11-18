@@ -226,7 +226,7 @@ def test_booking_uses_one_drop_and_cancel_before_pickup_returns_it(session):
     order = book(session, merchant)
     assert (merchant.drops_left, order.drop_used) == (19, True)
     advance(session, order, rider, S.ASSIGNED)
-    transition(session, order, S.CANCELLED, "merchant", merchant.id)
+    transition(session, order, S.CANCELLED, "merchant", merchant.id, at=T0)
     assert (merchant.drops_left, order.drop_used) == (20, False)
     assert events(session, order)[-1].data["drop_returned"] is True
 

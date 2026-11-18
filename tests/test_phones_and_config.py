@@ -33,6 +33,13 @@ def test_mask_phone_hides_the_middle():
     assert mask_phone("+256772123456") == "+25677****456"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_env(monkeypatch):
+    """Docker Compose loads .env into the environment; these tests must see only their own values."""
+    for name in Settings.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+
+
 def _settings(**kwargs):
     return Settings(_env_file=None, **kwargs)
 

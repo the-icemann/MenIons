@@ -88,7 +88,9 @@ ngrok http 8000                                    # prints https://<random>.ngr
 Then in the Kapso dashboard:
 
 1. Set the webhook URL to `https://<tunnel-host>/webhooks/whatsapp`.
-2. Choose the **Meta payload format** (not Kapso's own format).
+2. Choose the payload format. On a real number use the **Meta format**. The Kapso **sandbox
+   refuses Meta-format webhooks**, so there use **Kapso's own format, payload v2**, with the
+   `whatsapp.message.*` events. The backend reads both and tells them apart by shape.
 3. Copy the webhook secret into `KAPSO_WEBHOOK_SECRET`, set `WHATSAPP_WEBHOOK_SIGNATURE=kapso`,
    and restart: `docker compose up -d`.
 4. If the dashboard asks for a verify token, use the value of `WHATSAPP_VERIFY_TOKEN`.
@@ -108,7 +110,7 @@ Each is marked in the code and isolated to one place.
 
 | Where | What to confirm |
 | --- | --- |
-| `app/whatsapp/signatures.py` | Which signature header and algorithm Kapso uses on **Meta-format forwarded** webhooks. Kapso's docs describe `X-Webhook-Signature` as a hex HMAC-SHA256 of the raw body for its own format, and that is what `kapso` mode checks. If Kapso relays Meta's `X-Hub-Signature-256` instead, set `WHATSAPP_WEBHOOK_SIGNATURE=meta` |
+| `app/whatsapp/signatures.py` | Which signature header and algorithm Kapso uses on **Meta-format forwarded** webhooks. For Kapso's own format, `X-Webhook-Signature` (hex HMAC-SHA256 of the raw body) is **confirmed** on the sandbox. If Meta-format forwarding relays Meta's `X-Hub-Signature-256` instead, set `WHATSAPP_WEBHOOK_SIGNATURE=meta` |
 | `app/config.py` | The API version in the base URL (`v24.0`). Kapso's SDK docs also show `https://app.kapso.ai/api/meta/` as a base; set `WHATSAPP_API_BASE` if the default is wrong |
 | `app/cloud_api_adapter.py` | That Meta-format forwarding delivers Meta's payload unwrapped. The fixtures in `tests/fixtures/` follow Meta's documented examples; replace them with payloads captured from the Kapso sandbox |
 | `app/whatsapp/cloud_api.py` | That media download through the proxy works like Meta's: `GET /{media_id}` returns a URL, fetched with the same auth header |
@@ -125,6 +127,7 @@ portal and types the FDN and verification code in when approving a plan purchase
 | `app/receipts.py` | `issue_receipt()`, the hash chain, cash handovers, payouts, the receipt page |
 | `app/webhooks.py` | `POST /webhooks/whatsapp`: verify, store, de-duplicate, normalize, route |
 | `app/cloud_api_adapter.py`, `app/events.py` | Cloud API payload to normalized events |
+| `app/kapso_adapter.py` | Kapso's own webhook format (v2) to the same events. Inbound messages reuse the Cloud API message reader; `kapso.direction` decides message vs status, because Kapso marks inbound messages `status: delivered` |
 | `app/router.py` | Phone to role to handler (stubs), and `in_free_window()` |
 | `app/whatsapp/` | Provider protocol, the one Cloud API client, signature verifiers, the fake |
 
