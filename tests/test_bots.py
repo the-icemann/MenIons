@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from app import messaging, plans, router
+from app import billing, messaging, plans, router
 from app.config import get_settings
 from app.events import ButtonReply, ContactShared, ListReply, LocationShared, MediaReceived, TextMessage
 from app.messaging import Outgoing, deliver, take_outbox
@@ -73,9 +73,13 @@ def photo(session, sender):
 
 
 def talk(session, event) -> list[Outgoing]:
+    """One inbound message, handled as the webhook does: dispatch, commit, then send any
+    payment requests to pawaPay; returns the queued replies."""
     take_outbox(session)
+    billing.take_queued_deposits(session)
     with session.begin_nested():
         router.dispatch(session, event)
+    billing.send_queued_deposits(session, billing.take_queued_deposits(session))
     return take_outbox(session)
 
 

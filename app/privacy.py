@@ -34,7 +34,8 @@ from app.models import (
 
 log = logging.getLogger(__name__)
 PRIVACY_UPDATED = "22 November 2026"
-CLOSED = (OrderStatus.DELIVERED, OrderStatus.CANCELLED)
+# FAILED counts as finished here: it only moves on if an admin reschedules it, which may never happen.
+CLOSED = (OrderStatus.DELIVERED, OrderStatus.CANCELLED, OrderStatus.FAILED)
 OPEN = tuple(s for s in OrderStatus if s not in CLOSED)
 PURGED = {"purged": True}
 REMOVED = "(removed)"

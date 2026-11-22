@@ -31,6 +31,7 @@ from app.events import ContactShared, InboundEvent, LocationShared
 from app.models import (
     EXPECTED_DAILY_DROPS,
     Conversation,
+    Deposit,
     Merchant,
     MerchantStatus,
     Order,
@@ -39,7 +40,7 @@ from app.models import (
     PlanRequestStatus,
 )
 from app.orders import InvalidTransition, TransitionConditionFailed
-from app.payments.base import PROVIDER_NAMES
+from app.payments.base import GatewayError
 from app.phones import InvalidPhone, normalize_phone
 from app.privacy import privacy_link
 
@@ -225,7 +226,7 @@ def _payment_instructions(request: PlanRequest) -> str:
 
 def _ask_to_pay(session: Session, conversation: Conversation, merchant: Merchant, request: PlanRequest) -> None:
     plan = plans.get_plan(request.plan)
-    go(conversation, "plan:pay", request_id=request.id, pay_phone=None)
+    go(conversation, "plan:pay", request_id=request.id)
     box(session).buttons(
         conversation.phone,
         f"*{plan.name}*: {ugx(plan.price_ugx)} for {plan.drops} drops.\n\n"
@@ -236,45 +237,64 @@ def _ask_to_pay(session: Session, conversation: Conversation, merchant: Merchant
     )  # fmt: skip
 
 
+def _show_manual(session: Session, conversation: Conversation, request: PlanRequest) -> None:
+    go(conversation, "plan:manual", request_id=request.id)
+    box(session).buttons(conversation.phone, _payment_instructions(request),
+                         [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")])  # fmt: skip
+
+
+def _show_waiting(session: Session, conversation: Conversation, deposit) -> None:
+    text, buttons = billing.waiting_message(deposit)
+    box(session).buttons(conversation.phone, text, buttons)
+
+
 def _pay(
-    session: Session, event: InboundEvent, conversation: Conversation, merchant: Merchant, request: PlanRequest
+    session: Session,
+    event: InboundEvent,
+    conversation: Conversation,
+    merchant: Merchant,
+    request: PlanRequest,
+    payer: str,
 ) -> None:
+    """Start a payment from `payer`, a phone named by the button or typed: never remembered."""
     phone, out = conversation.phone, box(session)
-    c = ctx(conversation)
-    payer = c.get("pay_phone") if c.get("request_id") == request.id and c.get("pay_phone") else merchant.phone
     try:
         started = billing.start_deposit(session, request, payer, event.received_at)
     except billing.BillingError:
         out.text(phone, f"That payment request is already {request.status.lower()}. Send *menu* to see your options.")
         return
-    go(conversation, "plan:paying", request_id=request.id, pay_phone=payer)
+    go(conversation, "plan:paying", request_id=request.id)
     if started.failure_code is None:
-        network = PROVIDER_NAMES.get(started.deposit.provider, "Mobile Money")
-        out.text(
-            phone,
-            f"📲 Check the phone {local_phone(payer)}: approve {ugx(request.amount_ugx)} to Men-Ions with your "
-            f"{network} PIN.\n\nWe'll message you here the moment it's through.",
-        )
-    elif started.failure_code == "PAYMENT_IN_PROGRESS" and started.deposit is not None:
-        out.buttons(
-            phone,
-            f"⏳ A payment request is already waiting on {local_phone(started.deposit.payer_phone)}. "
-            "Approve it with your PIN. If it timed out, we'll tell you in a minute or two and you can try again.",
-            [(f"paynum:{request.id}", "Another number"), ("plan:change", "Change plan")],
-        )
-    elif started.failure_code == "GATEWAY_ERROR":
-        out.text(
-            phone,
-            "We couldn't reach Mobile Money just now. If a PIN prompt arrives, approve it. "
-            "Otherwise we'll message you in a few minutes so you can try again.",
-        )
-    else:
-        out.buttons(phone, f"❌ {billing.failure_text(started.failure_code)}", billing.retry_buttons(request))
+        return  # the PIN-prompt message follows once pawaPay has it (billing.send_queued_deposits)
+    if started.failure_code == "PAYMENT_IN_PROGRESS":
+        _show_waiting(session, conversation, started.deposit)
+        return
+    out.buttons(phone, f"❌ {billing.failure_text(started.failure_code)}", billing.retry_buttons(request))
 
 
 def _own_request(session: Session, merchant: Merchant, raw_id: str) -> PlanRequest | None:
     request = session.get(PlanRequest, int(raw_id)) if raw_id.isdigit() else None
     return request if request is not None and request.merchant_id == merchant.id else None
+
+
+def _own_deposit(session: Session, merchant: Merchant, raw_id: str) -> Deposit | None:
+    deposit = session.get(Deposit, int(raw_id)) if raw_id.isdigit() else None
+    if deposit is None or _own_request(session, merchant, str(deposit.plan_request_id)) is None:
+        return None
+    return deposit
+
+
+def _supersede_unpaid(session: Session, merchant: Merchant, keep: PlanRequest, at: datetime) -> None:
+    """Only the newest plan choice can be paid by PIN prompt: an older one paid later would
+    replace the plan and charge twice. (A payment already under way blocks new choices.)"""
+    for old in session.execute(
+        select(PlanRequest).where(
+            PlanRequest.merchant_id == merchant.id,
+            PlanRequest.status == PlanRequestStatus.AWAITING_PAYMENT,
+            PlanRequest.id != keep.id,
+        )
+    ).scalars():
+        old.status, old.approved_by, old.approved_at = PlanRequestStatus.REJECTED, "superseded", at
 
 
 def handle_plan_step(session: Session, event: InboundEvent, conversation: Conversation, merchant: Merchant) -> bool:
@@ -283,22 +303,55 @@ def handle_plan_step(session: Session, event: InboundEvent, conversation: Conver
     choice = choice_of(event)
     out = box(session)
     step = step_of(conversation, "plan:")
+    auto = payments.automatic()
 
     if choice.startswith("plan:"):
         key = choice.removeprefix("plan:")
+        live = billing.merchant_live_deposit(session, merchant.id) if auto else None
+        if live is not None:  # pawaPay can't cancel a prompt: no second payment until it ends
+            _show_waiting(session, conversation, live)
+            return True
         if key == "change":
             show_plans(session, conversation, merchant)
             return True
         if key not in plans.CATALOGUE:
             return False
         request = plans.create_plan_request(session, merchant, key, at=event.received_at)
-        if payments.automatic():
+        if auto:
+            _supersede_unpaid(session, merchant, request, event.received_at)
             _ask_to_pay(session, conversation, merchant, request)
-            return True
-        go(conversation, "plan:manual", request_id=request.id)
-        out.buttons(
-            phone, _payment_instructions(request), [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")]
-        )
+        else:
+            _show_manual(session, conversation, request)
+        return True
+
+    if choice.startswith(("chk:", "retry:")):
+        deposit = _own_deposit(session, merchant, choice.split(":", 1)[1])
+        if deposit is None:
+            return False
+        request = session.get(PlanRequest, deposit.plan_request_id)
+        if not auto:
+            _show_manual(session, conversation, request)
+        elif choice.startswith("retry:"):
+            if request.status in billing.PAYABLE:
+                _pay(session, event, conversation, merchant, request, deposit.payer_phone)
+            else:
+                out.text(
+                    phone, f"That payment request is already {request.status.lower()}. Send *menu* to see your options."
+                )
+        else:
+            try:
+                result = billing.check_deposit(session, deposit, event.received_at)
+            except GatewayError:
+                out.text(phone, "We couldn't check with Mobile Money just now. Try again in a minute.")
+                return True
+            if result in ("pending", "final") and deposit.status in billing.LIVE_DEPOSIT:
+                _show_waiting(session, conversation, deposit)
+            elif result == "final" and deposit.status == "FAILED":
+                out.buttons(
+                    phone, f"❌ {billing.failure_text(deposit.failure_code)}", billing.retry_buttons(request, deposit)
+                )
+            elif result == "final":
+                show_menu(session, conversation, merchant, now=event.received_at)
         return True
 
     if choice.startswith(("pay:", "paynum:", "manual:")):
@@ -311,15 +364,17 @@ def handle_plan_step(session: Session, event: InboundEvent, conversation: Conver
                 phone, f"That payment request is already {request.status.lower()}. Send *menu* to see your options."
             )
             return True
-        if action == "pay":
-            _pay(session, event, conversation, merchant, request)
-        elif action == "paynum":
+        if action == "manual" or not auto:
+            _show_manual(session, conversation, request)
+        elif action == "pay":
+            _pay(session, event, conversation, merchant, request, merchant.phone)
+        else:
+            live = billing.merchant_live_deposit(session, merchant.id)
+            if live is not None:
+                _show_waiting(session, conversation, live)
+                return True
             go(conversation, "plan:paynum", request_id=request.id)
             out.text(phone, "Type the *MTN or Airtel number* to pay from (for example 0772 123456).")
-        else:
-            go(conversation, "plan:manual", request_id=request.id)
-            out.buttons(phone, _payment_instructions(request),
-                        [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")])  # fmt: skip
         return True
 
     if step == "plan:paynum" and not is_reset(event):
@@ -327,13 +382,15 @@ def handle_plan_step(session: Session, event: InboundEvent, conversation: Conver
         if request is None or request.status not in billing.PAYABLE:
             show_plans(session, conversation, merchant)
             return True
+        if not auto:
+            _show_manual(session, conversation, request)
+            return True
         try:
             payer = normalize_phone(text_of(event))
         except InvalidPhone:
             out.text(phone, "That doesn't look like a Ugandan mobile number. Try again, like 0772 123456.")
             return True
-        go(conversation, "plan:paynum", request_id=request.id, pay_phone=payer)
-        _pay(session, event, conversation, merchant, request)
+        _pay(session, event, conversation, merchant, request, payer)
         return True
 
     if choice.startswith("paid:"):
@@ -360,17 +417,11 @@ def handle_plan_step(session: Session, event: InboundEvent, conversation: Conver
     if step in ("plan:pay", "plan:paying", "plan:manual") and not is_reset(event):
         request = _own_request(session, merchant, str(ctx(conversation).get("request_id") or ""))
         if request is not None and request.status in billing.PAYABLE:
-            live = billing.live_deposit(session, request)
+            live = billing.merchant_live_deposit(session, merchant.id) if auto else None
             if live is not None:
-                out.buttons(
-                    phone,
-                    f"⏳ Waiting for you to approve {ugx(request.amount_ugx)} on {local_phone(live.payer_phone)} "
-                    "with your Mobile Money PIN.",
-                    [(f"paynum:{request.id}", "Another number"), ("plan:change", "Change plan")],
-                )
-            elif step == "plan:manual":
-                out.buttons(phone, _payment_instructions(request),
-                            [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")])  # fmt: skip
+                _show_waiting(session, conversation, live)
+            elif step == "plan:manual" or not auto:  # "plan:pay" was the manual step before 0002
+                _show_manual(session, conversation, request)
             else:
                 _ask_to_pay(session, conversation, merchant, request)
             return True
@@ -384,6 +435,10 @@ def handle_merchant_pending(session: Session, event: InboundEvent, conversation:
     merchant = _merchant(session, conversation.phone)
     if handle_plan_step(session, event, conversation, merchant):
         return
+    live = billing.merchant_live_deposit(session, merchant.id) if payments.automatic() else None
+    if live is not None:
+        _show_waiting(session, conversation, live)
+        return
     claimed = (
         session.execute(
             select(PlanRequest)
@@ -393,24 +448,6 @@ def handle_merchant_pending(session: Session, event: InboundEvent, conversation:
         .scalars()
         .first()
     )
-    waiting = (
-        session.execute(
-            select(PlanRequest)
-            .where(PlanRequest.merchant_id == merchant.id, PlanRequest.status == PlanRequestStatus.AWAITING_PAYMENT)
-            .order_by(PlanRequest.id.desc())
-        )
-        .scalars()
-        .first()
-    )
-    live = billing.live_deposit(session, waiting) if waiting is not None else None
-    if live is not None:
-        box(session).buttons(
-            conversation.phone,
-            f"⏳ Waiting for you to approve {ugx(waiting.amount_ugx)} on {local_phone(live.payer_phone)} "
-            "with your Mobile Money PIN. Your plan starts as soon as it's through.",
-            [(f"paynum:{waiting.id}", "Another number"), ("plan:change", "Choose another plan")],
-        )
-        return
     if claimed:
         box(session).buttons(
             conversation.phone,

@@ -11,7 +11,7 @@ from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app import cloud_api_adapter, kapso_adapter
+from app import billing, cloud_api_adapter, kapso_adapter
 from app import router as event_router
 from app.clock import utcnow
 from app.config import Settings, get_settings
@@ -91,6 +91,7 @@ def receive(
     if not get_verifier(settings)(body, request.headers):
         raise HTTPException(status_code=401, detail="Bad signature")
     discard_outbox(session)  # start clean: nothing queued by earlier work on this session
+    billing.take_queued_deposits(session)
 
     # 2. Store before doing anything else. One row per message or status in the payload,
     #    each holding the full request; a retried webhook hits the unique id and is skipped.
@@ -116,6 +117,7 @@ def receive(
     #    handler that fails sends nothing: its queued messages are dropped with its changes.
     for row_id, event in fresh:
         queued = len(outbox(session).items)
+        deposits = len(billing.queued_deposits(session))
         try:
             with session.begin_nested():
                 event_router.dispatch(session, event)
@@ -123,9 +125,14 @@ def receive(
         except Exception as exc:  # noqa: BLE001
             log.exception("webhook event %s failed", row_id)
             del outbox(session).items[queued:]
+            del billing.queued_deposits(session)[deposits:]
             session.execute(update(WebhookEvent).where(WebhookEvent.id == row_id).values(error=repr(exc)[:2000]))
         session.commit()
 
-    # 4. Send. Failures are recorded as admin alerts; the webhook still answers 200.
+    # 4. Payment requests recorded while handling go to pawaPay only now, after the commit:
+    #    the deposit row exists before pawaPay hears of it, and no row is locked meanwhile.
+    billing.send_queued_deposits(session, billing.take_queued_deposits(session))
+
+    # 5. Send. Failures are recorded as admin alerts; the webhook still answers 200.
     deliver(session, take_outbox(session))
     return {"status": "ok"}
