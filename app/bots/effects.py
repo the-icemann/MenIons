@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.models import AdminAlert, Merchant, Order, Receipt, Rider
 from app.orders import SideEffect
 from app.plans import priority_riders
+from app.privacy import privacy_link
 from app.receipts import TITLES
 
 
@@ -54,7 +55,8 @@ def customer_location_request(order: Order, merchant: Merchant) -> str:
         f"Hi {order.customer_name} 👋 {merchant.shop_name} is sending you {order.package} "
         f"with Men-Ions (order {order.code}).\n\n"
         "Where should our rider bring it? Tap *Send location* and choose where you are, "
-        "or 📎 → Location."
+        "or 📎 → Location.\n\n"
+        f"We use your number and location only for this delivery: {privacy_link()}"
     )
 
 

@@ -7,9 +7,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app import receipts, webhooks
+from app import privacy, receipts, webhooks
 from app.config import get_settings
 from app.db import get_session
+from app.payments import callbacks as payment_callbacks
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ def create_app() -> FastAPI:
     )
     app.include_router(webhooks.router)
     app.include_router(receipts.router)
+    app.include_router(payment_callbacks.router)
+    app.include_router(privacy.router)
 
     @app.get("/healthz")
     def healthz(session: Session = Depends(get_session)):

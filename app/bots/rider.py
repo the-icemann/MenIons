@@ -13,6 +13,7 @@ from app.events import InboundEvent, MediaReceived
 from app.messaging import save_media
 from app.models import Conversation, Media, Merchant, Order, OrderStatus, Rider
 from app.orders import DropCodeRejected, InvalidTransition, TransitionConditionFailed
+from app.privacy import privacy_link
 
 S = OrderStatus
 FAIL_REASONS = [
@@ -30,6 +31,15 @@ def _rider(session: Session, phone: str) -> Rider:
 def _my_order(session: Session, rider: Rider, raw_id: str) -> Order | None:
     order = session.get(Order, int(raw_id)) if raw_id.isdigit() else None
     return order if order is not None and order.rider_id == rider.id else None
+
+
+def privacy_notice(name: str) -> str:
+    return (
+        f"Welcome to Men-Ions, {name}! 🛵\n\n"
+        "Before your first job: we keep your name, phone number, driving permit, ID and number plate, "
+        "and the photos you send of parcels. Shops and customers see your name and number while you "
+        "carry their parcel. Details: " + privacy_link() + "\n\nTap *I agree* to start."
+    )
 
 
 def show_menu(session: Session, conversation: Conversation, rider: Rider, intro: str = "") -> None:
@@ -212,6 +222,13 @@ def handle_rider(session: Session, event: InboundEvent, conversation: Conversati
 
     if not rider.active:
         box(session).text(phone, "Your rider account is not active. Please talk to the office.")
+        return
+    if rider.privacy_accepted_at is None:
+        if choice == "r:agree":
+            rider.privacy_accepted_at = event.received_at
+            show_menu(session, conversation, rider, "👍 Thank you. Go on shift to get job offers.")
+            return
+        box(session).buttons(phone, privacy_notice(rider.name), [("r:agree", "I agree")])
         return
     if choice in ("r:on", "r:off"):
         rider.on_shift = choice == "r:on"

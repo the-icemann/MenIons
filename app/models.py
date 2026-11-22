@@ -70,6 +70,38 @@ class PlanRequestStatus(StrEnum):
     PAYMENT_CLAIMED = "PAYMENT_CLAIMED"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    REFUNDED = "REFUNDED"
+
+
+class DepositStatus(StrEnum):
+    """pawaPay's deposit statuses, plus INITIATED: saved here before pawaPay is called."""
+
+    INITIATED = "INITIATED"
+    ACCEPTED = "ACCEPTED"
+    PROCESSING = "PROCESSING"
+    IN_RECONCILIATION = "IN_RECONCILIATION"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class RefundStatus(StrEnum):
+    INITIATED = "INITIATED"
+    ACCEPTED = "ACCEPTED"
+    PROCESSING = "PROCESSING"
+    IN_RECONCILIATION = "IN_RECONCILIATION"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class FiscalStatus(StrEnum):
+    PENDING = "PENDING"
+    ISSUED = "ISSUED"
+    CANCELLED = "CANCELLED"
+
+
+class FiscalKind(StrEnum):
+    INVOICE = "invoice"  # the e-receipt (or e-invoice) for a plan sale
+    CREDIT_NOTE = "credit_note"  # reverses it after a refund
 
 
 class ReceiptType(StrEnum):
@@ -98,7 +130,8 @@ PLAN_KEYS = (
 EXPECTED_DAILY_DROPS = ("1-2", "3-5", "6+")
 MEDIA_KINDS = ("pickup", "delivery")
 RECIPIENT_ROLES = ("merchant", "customer", "rider", "dispatcher")
-WEBHOOK_KINDS = ("message", "status", "unknown")
+WEBHOOK_KINDS = ("message", "status", "payment", "unknown")
+REFUND_METHODS = ("pawapay", "manual")
 
 
 def _one_of(column: str, values) -> str:
@@ -137,6 +170,9 @@ class Merchant(Base):
     drops_left: Mapped[int | None] = mapped_column(Integer)
     priority_rider_ids: Mapped[list[int]] = mapped_column(ARRAY(Integer), default=list, server_default="{}")
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Optional. Only VAT-registered shops need it, so it never blocks sign-up.
+    tin: Mapped[str | None] = mapped_column(String(16))
+    privacy_accepted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
@@ -148,6 +184,13 @@ class Rider(Base):
     phone: Mapped[str] = mapped_column(String(16), unique=True)
     on_shift: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # Checked by the office before the rider is added (/rider add).
+    permit_number: Mapped[str | None] = mapped_column(String(32))
+    national_id: Mapped[str | None] = mapped_column(String(32))
+    plate: Mapped[str | None] = mapped_column(String(16))
+    documents_checked_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    documents_checked_by: Mapped[str | None] = mapped_column(Text)
+    privacy_accepted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
@@ -177,6 +220,8 @@ class Order(Base):
     drop_used: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    # Set when the data clean-up removed the customer's pin, directions and the photos.
+    purged_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
 class OrderEvent(Base):
@@ -243,6 +288,98 @@ class PlanRequest(Base):
     approved_by: Mapped[str | None] = mapped_column(Text)
     approved_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+
+class Deposit(Base):
+    """One attempt to collect a plan payment through pawaPay. A failed attempt can be
+    followed by another for the same plan request, each with its own deposit_id."""
+
+    __tablename__ = "deposits"
+    __table_args__ = (
+        CheckConstraint(_one_of("status", DepositStatus), name="status"),
+        CheckConstraint("amount_ugx > 0", name="amount_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    deposit_id: Mapped[str] = mapped_column(String(36), unique=True)  # UUIDv4, ours, sent to pawaPay
+    plan_request_id: Mapped[int] = mapped_column(ForeignKey("plan_requests.id"), index=True)
+    payer_phone: Mapped[str] = mapped_column(String(16))
+    provider: Mapped[str] = mapped_column(String(32))  # MTN_MOMO_UGA | AIRTEL_OAPI_UGA
+    amount_ugx: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    provider_transaction_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class Refund(Base):
+    __tablename__ = "refunds"
+    __table_args__ = (
+        CheckConstraint(_one_of("status", RefundStatus), name="status"),
+        CheckConstraint(_one_of("method", REFUND_METHODS), name="method"),
+        CheckConstraint("amount_ugx > 0", name="amount_positive"),
+        CheckConstraint("(method = 'pawapay') = (deposit_id IS NOT NULL)", name="pawapay_has_deposit"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    refund_id: Mapped[str] = mapped_column(String(36), unique=True)
+    plan_request_id: Mapped[int] = mapped_column(ForeignKey("plan_requests.id"), index=True)
+    deposit_id: Mapped[int | None] = mapped_column(ForeignKey("deposits.id"))
+    method: Mapped[str] = mapped_column(String(16))
+    amount_ugx: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    requested_by: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class FiscalDocument(Base):
+    """An EFRIS document we owe URA: the e-receipt for a plan sale, or the credit note that
+    reverses it. Created PENDING the moment the money is in; ISSUED once URA's FDN is known.
+    URA allows 24 hours between the sale and the upload."""
+
+    __tablename__ = "fiscal_documents"
+    __table_args__ = (
+        CheckConstraint(_one_of("status", FiscalStatus), name="status"),
+        CheckConstraint(_one_of("kind", FiscalKind), name="kind"),
+        CheckConstraint(
+            "status <> 'ISSUED' OR (fdn IS NOT NULL AND verification_code IS NOT NULL)", name="issued_has_fdn"
+        ),
+        UniqueConstraint("plan_request_id", "kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_request_id: Mapped[int] = mapped_column(ForeignKey("plan_requests.id"))
+    kind: Mapped[str] = mapped_column(String(16))
+    # What admins type in /fdn: the payment reference, plus "-CN" for a credit note.
+    reference: Mapped[str] = mapped_column(String(40), unique=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    amount_ugx: Mapped[int] = mapped_column(Integer)
+    fdn: Mapped[str | None] = mapped_column(Text)
+    verification_code: Mapped[str | None] = mapped_column(Text)
+    qr_code: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    alerted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    issued_by: Mapped[str | None] = mapped_column(Text)
+    receipt_id: Mapped[int | None] = mapped_column(ForeignKey("receipts.id"))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    issued_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class JobRun(Base):
+    """When each scheduled job last ran, so the worker runs daily jobs once a day."""
+
+    __tablename__ = "job_runs"
+
+    name: Mapped[str] = mapped_column(String(48), primary_key=True)
+    last_run_at: Mapped[datetime] = mapped_column(TZDateTime)
 
 
 class CashHandover(Base):

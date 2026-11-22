@@ -16,12 +16,12 @@ the customer of an open order, or anyone else.
 
 | Who | What they can do |
 | --- | --- |
-| Anyone new | Register a shop: name, owner, what they sell, daily volume, pickup pin and landmark. Then choose a plan |
-| Pending merchant | Pay for the plan by Mobile Money with a reference, tap *I've paid*, wait for approval |
-| Merchant | Menu (opens by itself on approval): book a delivery, my orders, cancel an order, my plan, buy or renew, help. The customer is picked from recent customers, shared as a contact card (📎 → Contact), or typed |
+| Anyone new | Agree to the privacy notice and register a shop: name, owner, what they sell, daily volume, pickup pin and landmark. Then choose a plan |
+| Pending merchant | Pay for the plan: a PIN prompt on their phone (`PAYMENTS_PROVIDER=pawapay`), or Mobile Money sent by hand with a reference and *I've paid*. See [Plan payments and EFRIS](#plan-payments-and-efris) |
+| Merchant | Menu (opens by itself once paid): book a delivery, my orders, cancel an order, my plan, buy or renew, tax details (optional TIN), help. The customer is picked from recent customers, shared as a contact card (📎 → Contact), or typed |
 | Customer | Shares the delivery location (that makes the order READY), adds directions, asks for status. Gets the 4-digit drop code and an arrival estimate (`app/eta.py`: straight-line distance, a road factor and boda speeds; a range, not live traffic) |
-| Rider | Goes on and off shift, accepts job offers (first tap wins), sends a pickup photo, then a delivery photo and the customer's code; or reports a failed delivery |
-| Admin (`ADMIN_PHONES`) | Commands starting with `/`: approve payments (with the EFRIS FDN and code), add riders, assign, reschedule, cancel, unlock, suspend. Send `/help` |
+| Rider | Accepts the privacy notice once, goes on and off shift, accepts job offers (first tap wins), sends a pickup photo, then a delivery photo and the customer's code; or reports a failed delivery |
+| Admin (`ADMIN_PHONES`) | Commands starting with `/`: approve hand payments, record EFRIS FDNs (`/fdn`, `/fiscal`), refunds, `/reconcile`, add riders (with permit, NIN and plate), assign, reschedule, cancel, unlock, suspend, data requests (`/mydata`, `/forget`). Send `/help` |
 
 **We only deliver.** The bots never ask about, collect or pass on money for the goods: payment
 is between the merchant and the customer. (The cash-on-delivery columns, cash handovers and payouts
@@ -39,14 +39,61 @@ commit (`app/messaging.py`). Outside the window it goes through `WHATSAPP_UPDATE
 set; otherwise it is skipped and an `admin_alerts` row says what wasn't sent (courtesy notices
 are skipped quietly).
 
-**Testing with one phone.** The Kapso sandbox talks to one registered phone. Put that phone in
+## Plan payments and EFRIS
+
+```
+merchant picks a plan → "Pay from this phone" → PIN prompt (MTN or Airtel, through pawaPay)
+pawaPay callback, or the worker's check a minute later → we ASK pawaPay for the status
+  COMPLETED → plan starts, shop ACTIVE, menu opens (seconds after the PIN)
+              + a fiscal_documents row: URA's e-receipt is owed
+  FAILED    → the merchant is told why (no PIN, low balance, …) with Try again / Another number / Pay by hand
+EFRIS: an admin issues it on URA's portal and sends /fdn REF FDN CODE   (EFRIS_PROVIDER=manual)
+       → the plan receipt, with the FDN, goes to the merchant
+```
+
+- **Nothing waits for URA.** The plan starts when the money is in. URA allows 24 hours to upload
+  a receipt when EFRIS can't be used at the moment of sale; admins are alerted after
+  `EFRIS_ALERT_HOURS` (12) and the daily check flags anything older than 24 hours.
+- **A callback never starts a plan by itself.** `/webhooks/pawapay` stores the callback, then asks
+  pawaPay for the status (pawaPay's own advice) and checks the amount and currency.
+- **Merchants need no EFRIS, TIN or VAT registration.** EFRIS is our duty as the seller. A
+  VAT-registered shop can add its TIN (menu → Tax details) so it appears on the receipt.
+- **Refunds** (`/refund REF reason`) go back through pawaPay; when the money is back the plan ends,
+  the receipt is voided and, if an FDN was issued, an EFRIS credit note is owed (`/fdn REF-CN ...`).
+  A second payment for an already-paid plan is flagged and refunded with `/refund REF extra reason`.
+- **The daily check** (07:00, from the worker) sends admins yesterday's sales and anything that
+  doesn't add up between pawaPay, plans, EFRIS and receipts. `/reconcile` runs it on demand.
+- `PAYMENTS_PROVIDER=manual` keeps the old flow (send by hand, `/approve REF`). `/approve REF FDN CODE`
+  still records the FDN at once if it's already issued.
+- The pawaPay sandbox needs no real money: sign up at https://dashboard.sandbox.pawapay.io, set
+  `PAYMENTS_PROVIDER=pawapay` and `PAWAPAY_API_TOKEN`, and point the deposit and refund callback URLs
+  at `<PUBLIC_BASE_URL>/webhooks/pawapay?k=<PAWAPAY_CALLBACK_TOKEN>`.
+
+## Privacy
+
+- **Notice:** `GET /privacy` (from `app/templates/privacy.html`). Shops agree when they tap
+  *Agree & register*; riders tap *I agree* before their first job; customers get the link in the
+  first message about their parcel. `merchants.privacy_accepted_at` and `riders.privacy_accepted_at`
+  record when.
+- **Clean-up:** daily, the worker deletes customers' pins, directions, rider notes and parcel photos
+  of orders closed more than `DATA_RETENTION_DAYS` (90) ago, and blanks stored raw messages, alert
+  details and conversation state of the same age. Receipts and payment records are kept.
+- **Requests:** `/mydata PHONE` lists what we hold; `/forget PHONE` deletes it (refused while a
+  delivery is in progress). Receipts are sealed and kept, as financial records.
+
+## Testing with one phone
+
+The Kapso sandbox talks to one registered phone. Put that phone in
 `ADMIN_PHONES` and use `/as merchant`, `/as rider`, `/as customer`, `/as unknown` and `/as auto`
 to choose which bot answers your normal messages. `/as` is refused when `ENV=production`.
 A full run on one phone:
 
-1. Send `hi` and register a shop, choose a plan, tap *I've paid*.
-2. `/pending`, then `/approve <REF> TEST-FDN TEST-CODE`.
-3. `/rider add <your number> Your Name`, then `/as rider` and tap *Go on shift*.
+1. Send `hi` and register a shop, choose a plan. With `PAYMENTS_PROVIDER=manual` tap *I've paid*; with
+   the pawaPay sandbox tap *Pay from this phone* (the sandbox completes it without a PIN).
+2. Manual: `/pending`, then `/approve <REF> TEST-FDN TEST-CODE`. pawaPay: the plan starts by itself;
+   then `/fdn <REF> TEST-FDN TEST-CODE` for the receipt.
+3. `/rider add <your number> DL1234567 CM90001234ABCD UFA123B Your Name`, then `/as rider`, tap
+   *I agree*, then *Go on shift*.
 4. `/as merchant`, `menu`, book a delivery with your own number as the customer.
 5. `/as customer`, send anything, share a location. You get the drop code; the rider bot gets a job offer.
 6. `/as rider`: accept, *Picked up*, photo, *Delivered*, photo, type the code.
@@ -57,7 +104,7 @@ You need Docker with the Compose plugin.
 
 ```bash
 cp .env.example .env                                # the defaults work for local development
-docker compose up -d --build                        # starts db and api (http://localhost:8000)
+docker compose up -d --build                        # starts db, api (http://localhost:8000) and worker
 docker compose run --rm api alembic upgrade head    # creates all tables
 curl localhost:8000/healthz                         # {"status":"ok","database":"ok"}
 ```
@@ -101,11 +148,20 @@ git-ignored.
 | `MOMO_PAY_NUMBER`, `MOMO_PAY_NAME` | Where merchants pay for plans |
 | `WHATSAPP_UPDATE_TEMPLATE`, `WHATSAPP_TEMPLATE_LANGUAGE` | Approved template with one body parameter, for messages outside the 24-hour window |
 | `MEDIA_DIR` | Where pickup and delivery photos are saved (default `var/media`) |
+| `PAYMENTS_PROVIDER` | `manual` (default: Mobile Money by hand, `/approve`) or `pawapay` (PIN prompt) |
+| `PAWAPAY_API_TOKEN`, `PAWAPAY_API_BASE` | pawaPay API token and base URL (sandbox by default; production `https://api.pawapay.io`) |
+| `PAWAPAY_CALLBACK_TOKEN` | Required with `pawapay` (16+ random characters); the callback URL ends in `?k=<token>` |
+| `EFRIS_PROVIDER` | `manual` (default: `/fdn` from admins) or `fake` (development only) |
+| `EFRIS_ALERT_HOURS` | Alert admins when an FDN has waited this long (default 12; URA allows 24) |
+| `DATA_RETENTION_DAYS` | Days after an order closes before its personal data is deleted (default 90, minimum 7) |
+| `PRIVACY_CONTACT` | Contact shown in the privacy notice (defaults to `COMPANY_PHONE`) |
 
 The app refuses to start when:
 
 - `ENV=production` and `WHATSAPP_WEBHOOK_SIGNATURE=none`;
-- a provider or signature mode is chosen without its secret, or without a phone number id.
+- a provider or signature mode is chosen without its secret, or without a phone number id;
+- `PAYMENTS_PROVIDER=pawapay` without `PAWAPAY_API_TOKEN`, or without a `PAWAPAY_CALLBACK_TOKEN` of 16+ characters;
+- `ENV=production` and `EFRIS_PROVIDER=fake`.
 
 ## Switching WhatsApp provider
 
@@ -162,15 +218,25 @@ Each is marked in the code and isolated to one place.
 | `app/cloud_api_adapter.py` | That Meta-format forwarding delivers Meta's payload unwrapped. The fixtures in `tests/fixtures/` follow Meta's documented examples; replace them with payloads captured from the Kapso sandbox |
 | `app/whatsapp/cloud_api.py` | That media download through the proxy works like Meta's: `GET /{media_id}` returns a URL, fetched with the same auth header |
 
-Also open: `TODO(efris-api)` in `app/plans.py`. The dispatcher issues the EFRIS receipt on URA's
-portal and types the FDN and verification code in when approving a plan purchase.
+Also open:
+
+- `TODO(efris-api)` in `app/efris.py`: a provider for URA's system-to-system API or an accredited
+  integrator. Until then admins issue each e-receipt on URA's portal and send `/fdn`.
+- `TODO(pawapay-docs)` in `app/payments/pawapay.py`: the refund request and status shapes are
+  assumed to mirror deposits. Deposits, status checks and provider prediction follow pawaPay's v2
+  docs. Check a refund in the sandbox before the first real one.
 
 ## How the pieces fit
 
 | File | Job |
 | --- | --- |
 | `app/orders.py` | `create_order()` and `transition()`: the only ways to set an order's status |
-| `app/plans.py` | Plan catalogue, drop accounting, plan purchase requests |
+| `app/plans.py` | Plan catalogue, drop accounting, plan purchase requests, `approve_plan_request()` |
+| `app/billing.py` | Plan payments end to end: pawaPay deposits, EFRIS documents (`record_fdn()`), refunds, `reconcile()` and the daily summary |
+| `app/payments/` | The gateway protocol, the pawaPay v2 client, the `/webhooks/pawapay` callback, and a fake for tests |
+| `app/efris.py` | EFRIS providers: `manual` (admins type the FDN) and `fake`; where a URA or integrator connection plugs in |
+| `app/privacy.py` | The `/privacy` page, the data clean-up, `/mydata` and `/forget` |
+| `app/worker.py` | `python -m app.worker`: payment checks, EFRIS retries and alerts every 30 s; the daily check and clean-up |
 | `app/receipts.py` | `issue_receipt()`, the hash chain, cash handovers, payouts, the receipt page |
 | `app/webhooks.py` | `POST /webhooks/whatsapp`: verify, store, de-duplicate, normalize, route |
 | `app/cloud_api_adapter.py`, `app/events.py` | Cloud API payload to normalized events |
@@ -199,7 +265,11 @@ Where the brief was ambiguous or silent, this is what was chosen.
   All alerts go in this one table, including the drop-code lock.
 - **`order_events.kind`.** `transition` rows are status changes. `drop_code_wrong` and
   `drop_code_reset` rows count wrong codes; they are not status changes.
-- **`webhook_events.kind`** (`message`, `status`, `unknown`).
+- **`webhook_events.kind`** (`message`, `status`, `payment`, `unknown`).
+- **`deposits`, `refunds`, `fiscal_documents`** (migration 0002). A plan request can have several
+  deposit attempts; the one that paid is named in `approved_by` as `pawapay:<deposit id>`. A
+  plan_purchase receipt is issued only once its FDN is known, so the CHECK that every plan receipt
+  carries an FDN still holds. Plans approved before 0002 are backfilled as ISSUED.
 - **Admin identities are text** (`approved_by`, `paid_by`, `dispatcher_id`, admin `actor_id`).
   There is no admin table: admins are the phones in `ADMIN_PHONES`.
 - **`order_events` is append-only by trigger**, like `receipts`.
