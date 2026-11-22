@@ -51,6 +51,33 @@ class Settings(BaseSettings):
     company_address: str = "Kampala, Uganda"
     company_phone: str = ""
 
+    # --- Plan payments ---------------------------------------------------------------
+    # manual: the merchant sends Mobile Money by hand and an admin approves with /approve.
+    # pawapay: the merchant gets a PIN prompt on their phone; the plan starts the moment
+    #          pawaPay confirms the payment. Manual stays available as a fallback.
+    payments_provider: Literal["manual", "pawapay"] = "manual"
+    pawapay_api_token: str = ""
+    # Sandbox by default. Production: https://api.pawapay.io
+    pawapay_api_base: str = "https://api.sandbox.pawapay.io"
+    # Optional: a long random string added to the callback URL as ?k=... in pawaPay's dashboard.
+    # Callbacks are never trusted on their own (we always re-check the status with pawaPay),
+    # so this only keeps strangers from making us call pawaPay.
+    pawapay_callback_token: str = ""
+
+    # --- EFRIS (URA e-receipts) ------------------------------------------------------
+    # manual: admins issue the e-receipt on URA's portal and send /fdn REF FDN CODE.
+    # fake:   made-up FDNs, for development only (refused in production).
+    efris_provider: Literal["manual", "fake"] = "manual"
+    # Admins are alerted when a sale has waited this long for its FDN. URA allows 24 hours.
+    efris_alert_hours: int = 12
+
+    # --- Privacy -----------------------------------------------------------------------
+    # Delivery photos, customers' pins and directions, and raw WhatsApp messages are deleted
+    # this many days after an order closes. Receipts are kept: they are financial records.
+    data_retention_days: int = 90
+    # Who people contact about their data. Shown in the privacy notice.
+    privacy_contact: str = ""
+
     @property
     def admin_phone_list(self) -> list[str]:
         from app.phones import InvalidPhone, normalize_wa_id
@@ -83,6 +110,12 @@ class Settings(BaseSettings):
             problems.append("WHATSAPP_PROVIDER=meta needs META_ACCESS_TOKEN")
         if self.whatsapp_provider in ("kapso", "meta") and not self.whatsapp_phone_number_id:
             problems.append(f"WHATSAPP_PROVIDER={self.whatsapp_provider} needs WHATSAPP_PHONE_NUMBER_ID")
+        if self.payments_provider == "pawapay" and not self.pawapay_api_token:
+            problems.append("PAYMENTS_PROVIDER=pawapay needs PAWAPAY_API_TOKEN")
+        if self.env == "production" and self.efris_provider == "fake":
+            problems.append("EFRIS_PROVIDER=fake is not allowed when ENV=production")
+        if self.data_retention_days < 7:
+            problems.append("DATA_RETENTION_DAYS must be at least 7")
         if problems:
             raise ValueError("; ".join(problems))
         return self

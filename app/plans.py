@@ -10,10 +10,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import receipts
 from app.clock import KAMPALA, utcnow
 from app.models import (
     PLAN_KEYS,
+    FiscalDocument,
     Merchant,
     MerchantStatus,
     Order,
@@ -163,9 +163,7 @@ def _momo_reference(session: Session, merchant: Merchant) -> str:
     return f"MNI-{slug}-{number:03d}"
 
 
-def create_plan_request(
-    session: Session, merchant: Merchant, plan_key: str, at: datetime | None = None
-) -> PlanRequest:
+def create_plan_request(session: Session, merchant: Merchant, plan_key: str, at: datetime | None = None) -> PlanRequest:
     plan = get_plan(plan_key)
     request = PlanRequest(
         merchant_id=merchant.id,
@@ -202,34 +200,48 @@ def claim_payment(session: Session, request: PlanRequest, at: datetime | None = 
     session.flush()
 
 
+@dataclass(frozen=True)
+class Approval:
+    """What approving a plan request produced. `receipt` exists only once the FDN is known."""
+
+    request: PlanRequest
+    fiscal: FiscalDocument
+    receipt: Receipt | None
+    was_pending: bool  # the merchant was new (PENDING) and is now ACTIVE
+
+
 def approve_plan_request(
     session: Session,
     request: PlanRequest,
-    admin_id: str,
+    approved_by: str,
     at: datetime | None = None,
     *,
-    efris_fdn: str,
-    efris_verification_code: str,
-) -> Receipt | None:
-    """An admin confirms the money arrived. In one transaction: the request becomes APPROVED,
-    the plan starts, a PENDING merchant becomes ACTIVE, and the plan_purchase receipt is issued.
+    efris_fdn: str | None = None,
+    efris_verification_code: str | None = None,
+) -> Approval | None:
+    """The money is in. In one transaction: the request becomes APPROVED, the plan starts, a
+    PENDING merchant becomes ACTIVE, and a FiscalDocument records that URA's e-receipt is owed.
 
-    Returns the receipt, or None if the request was already approved (nothing changes then).
+    approved_by is an admin's phone, or "pawapay:<deposit id>" for an automatic payment.
+    With the FDN and verification code, the e-receipt is recorded and the plan_purchase
+    receipt is issued at once; without them, the receipt follows when the FDN arrives
+    (billing.record_fdn). URA allows 24 hours for that.
 
-    TODO(efris-api): the dispatcher issues the EFRIS receipt on URA's portal and types the
-    FDN and verification code in. Automate this through the EFRIS API later.
+    Returns None if the request was already approved (nothing changes then).
     """
+    from app import billing
+
     at = at or utcnow()
+    efris_fdn = (efris_fdn or "").strip()
+    efris_verification_code = (efris_verification_code or "").strip()
+    if bool(efris_fdn) != bool(efris_verification_code):
+        raise PlanError("give both the EFRIS FDN and the verification code, or neither")
     with session.begin_nested():
         request = _lock_request(session, request)
         if request.status == PlanRequestStatus.APPROVED:
             return None
         if request.status not in (PlanRequestStatus.PAYMENT_CLAIMED, PlanRequestStatus.AWAITING_PAYMENT):
             raise PlanError(f"request is {request.status}; it can't be approved")
-        efris_fdn = (efris_fdn or "").strip()
-        efris_verification_code = (efris_verification_code or "").strip()
-        if not efris_fdn or not efris_verification_code:
-            raise PlanError("the EFRIS FDN and verification code are required to approve a plan purchase")
 
         merchant = session.execute(
             select(Merchant)
@@ -239,29 +251,22 @@ def approve_plan_request(
         ).scalar_one()
 
         request.status = PlanRequestStatus.APPROVED
-        request.approved_by = str(admin_id)
+        request.approved_by = str(approved_by)
         request.approved_at = at
         activate_plan(merchant, request.plan, at)
-        if merchant.status == MerchantStatus.PENDING:
+        was_pending = merchant.status == MerchantStatus.PENDING
+        if was_pending:
             merchant.status = MerchantStatus.ACTIVE
         session.flush()
 
-        plan = get_plan(request.plan)
-        return receipts.issue_plan_purchase(
-            session,
-            merchant=merchant,
-            request=request,
-            plan_name=plan.name,
-            drops=plan.drops,
-            efris_fdn=efris_fdn,
-            efris_verification_code=efris_verification_code,
-            at=at,
-        )
+        fiscal = billing.open_invoice(session, request, at)
+        receipt = None
+        if efris_fdn:
+            receipt = billing.record_fdn(session, fiscal, efris_fdn, efris_verification_code, str(approved_by), at)
+        return Approval(request, fiscal, receipt, was_pending)
 
 
-def reject_plan_request(
-    session: Session, request: PlanRequest, admin_id: str, at: datetime | None = None
-) -> None:
+def reject_plan_request(session: Session, request: PlanRequest, admin_id: str, at: datetime | None = None) -> None:
     request = _lock_request(session, request)
     if request.status == PlanRequestStatus.REJECTED:
         return

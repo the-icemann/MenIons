@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import orders, plans
+from app import billing, orders, payments, plans
 from app.bots import effects
 from app.bots.common import (
     STATUS_LABELS,
@@ -38,7 +39,9 @@ from app.models import (
     PlanRequestStatus,
 )
 from app.orders import InvalidTransition, TransitionConditionFailed
+from app.payments.base import PROVIDER_NAMES
 from app.phones import InvalidPhone, normalize_phone
+from app.privacy import privacy_link
 
 S = OrderStatus
 CANCELLABLE = (S.BOOKED, S.READY, S.ASSIGNED)
@@ -76,8 +79,9 @@ def handle_unknown(session: Session, event: InboundEvent, conversation: Conversa
         out.text(phone, "No problem. Send *hi* any time you'd like to register your shop.")
         return
     if choice in ("onb:start", "onb:restart"):
+        agreed = ctx(conversation).get("privacy_at") or event.received_at.isoformat()
         clear(conversation)
-        go(conversation, "onb:shop")
+        go(conversation, "onb:shop", privacy_at=agreed)
         out.text(phone, "Great! Let's set up your shop. It takes about a minute.\n\nWhat is your *shop's name*?")
         return
     if not step or (is_reset(event) and step != "onb:shop"):
@@ -85,14 +89,15 @@ def handle_unknown(session: Session, event: InboundEvent, conversation: Conversa
         out.buttons(
             phone,
             "Hi 👋 Men-Ions delivers parcels for shops in Kampala by boda, booked right here on WhatsApp.\n\n"
-            "Would you like to register your shop?",
-            [("onb:start", "Register my shop"), ("onb:no", "Not now")],
+            "Would you like to register your shop?\n\n"
+            f"By registering you agree to how we handle your details: {privacy_link()}",
+            [("onb:start", "Agree & register"), ("onb:no", "Not now")],
         )
         return
 
     if step == "onb:welcome":
         out.buttons(
-            phone, "Tap *Register my shop* to begin.", [("onb:start", "Register my shop"), ("onb:no", "Not now")]
+            phone, "Tap *Agree & register* to begin.", [("onb:start", "Agree & register"), ("onb:no", "Not now")]
         )
     elif step == "onb:shop":
         if not 2 <= len(text) <= 80:
@@ -163,6 +168,9 @@ def handle_unknown(session: Session, event: InboundEvent, conversation: Conversa
         merchant.pickup_lat, merchant.pickup_lng = c["lat"], c["lng"]
         merchant.pickup_text = c["landmark"]
         merchant.status = MerchantStatus.PENDING
+        merchant.privacy_accepted_at = (
+            datetime.fromisoformat(c["privacy_at"]) if c.get("privacy_at") else event.received_at
+        )
         session.add(merchant)
         session.flush()
         clear(conversation)
@@ -215,11 +223,66 @@ def _payment_instructions(request: PlanRequest) -> str:
     )
 
 
+def _ask_to_pay(session: Session, conversation: Conversation, merchant: Merchant, request: PlanRequest) -> None:
+    plan = plans.get_plan(request.plan)
+    go(conversation, "plan:pay", request_id=request.id, pay_phone=None)
+    box(session).buttons(
+        conversation.phone,
+        f"*{plan.name}*: {ugx(plan.price_ugx)} for {plan.drops} drops.\n\n"
+        f"We'll send a payment request to *{local_phone(merchant.phone)}* (MTN or Airtel). "
+        "Approve it with your Mobile Money PIN and your plan starts straight away.",
+        [(f"pay:{request.id}", "Pay from this phone"), (f"paynum:{request.id}", "Another number"),
+         ("plan:change", "Change plan")],
+    )  # fmt: skip
+
+
+def _pay(
+    session: Session, event: InboundEvent, conversation: Conversation, merchant: Merchant, request: PlanRequest
+) -> None:
+    phone, out = conversation.phone, box(session)
+    c = ctx(conversation)
+    payer = c.get("pay_phone") if c.get("request_id") == request.id and c.get("pay_phone") else merchant.phone
+    try:
+        started = billing.start_deposit(session, request, payer, event.received_at)
+    except billing.BillingError:
+        out.text(phone, f"That payment request is already {request.status.lower()}. Send *menu* to see your options.")
+        return
+    go(conversation, "plan:paying", request_id=request.id, pay_phone=payer)
+    if started.failure_code is None:
+        network = PROVIDER_NAMES.get(started.deposit.provider, "Mobile Money")
+        out.text(
+            phone,
+            f"📲 Check the phone {local_phone(payer)}: approve {ugx(request.amount_ugx)} to Men-Ions with your "
+            f"{network} PIN.\n\nWe'll message you here the moment it's through.",
+        )
+    elif started.failure_code == "PAYMENT_IN_PROGRESS" and started.deposit is not None:
+        out.buttons(
+            phone,
+            f"⏳ A payment request is already waiting on {local_phone(started.deposit.payer_phone)}. "
+            "Approve it with your PIN. If it timed out, we'll tell you in a minute or two and you can try again.",
+            [(f"paynum:{request.id}", "Another number"), ("plan:change", "Change plan")],
+        )
+    elif started.failure_code == "GATEWAY_ERROR":
+        out.text(
+            phone,
+            "We couldn't reach Mobile Money just now. If a PIN prompt arrives, approve it. "
+            "Otherwise we'll message you in a few minutes so you can try again.",
+        )
+    else:
+        out.buttons(phone, f"❌ {billing.failure_text(started.failure_code)}", billing.retry_buttons(request))
+
+
+def _own_request(session: Session, merchant: Merchant, raw_id: str) -> PlanRequest | None:
+    request = session.get(PlanRequest, int(raw_id)) if raw_id.isdigit() else None
+    return request if request is not None and request.merchant_id == merchant.id else None
+
+
 def handle_plan_step(session: Session, event: InboundEvent, conversation: Conversation, merchant: Merchant) -> bool:
     """Plan choice and payment, for pending and active merchants. True if it handled the event."""
     phone = conversation.phone
     choice = choice_of(event)
     out = box(session)
+    step = step_of(conversation, "plan:")
 
     if choice.startswith("plan:"):
         key = choice.removeprefix("plan:")
@@ -229,17 +292,55 @@ def handle_plan_step(session: Session, event: InboundEvent, conversation: Conver
         if key not in plans.CATALOGUE:
             return False
         request = plans.create_plan_request(session, merchant, key, at=event.received_at)
-        go(conversation, "plan:pay", request_id=request.id)
+        if payments.automatic():
+            _ask_to_pay(session, conversation, merchant, request)
+            return True
+        go(conversation, "plan:manual", request_id=request.id)
         out.buttons(
             phone, _payment_instructions(request), [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")]
         )
         return True
 
-    if choice.startswith("paid:"):
-        request = session.get(PlanRequest, int(choice.removeprefix("paid:")) if choice[5:].isdigit() else 0)
-        if request is None or request.merchant_id != merchant.id:
+    if choice.startswith(("pay:", "paynum:", "manual:")):
+        action, raw_id = choice.split(":", 1)
+        request = _own_request(session, merchant, raw_id)
+        if request is None:
             return False
-        if request.status in (PlanRequestStatus.APPROVED, PlanRequestStatus.REJECTED):
+        if request.status not in billing.PAYABLE:
+            out.text(
+                phone, f"That payment request is already {request.status.lower()}. Send *menu* to see your options."
+            )
+            return True
+        if action == "pay":
+            _pay(session, event, conversation, merchant, request)
+        elif action == "paynum":
+            go(conversation, "plan:paynum", request_id=request.id)
+            out.text(phone, "Type the *MTN or Airtel number* to pay from (for example 0772 123456).")
+        else:
+            go(conversation, "plan:manual", request_id=request.id)
+            out.buttons(phone, _payment_instructions(request),
+                        [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")])  # fmt: skip
+        return True
+
+    if step == "plan:paynum" and not is_reset(event):
+        request = _own_request(session, merchant, str(ctx(conversation).get("request_id") or ""))
+        if request is None or request.status not in billing.PAYABLE:
+            show_plans(session, conversation, merchant)
+            return True
+        try:
+            payer = normalize_phone(text_of(event))
+        except InvalidPhone:
+            out.text(phone, "That doesn't look like a Ugandan mobile number. Try again, like 0772 123456.")
+            return True
+        go(conversation, "plan:paynum", request_id=request.id, pay_phone=payer)
+        _pay(session, event, conversation, merchant, request)
+        return True
+
+    if choice.startswith("paid:"):
+        request = _own_request(session, merchant, choice.removeprefix("paid:"))
+        if request is None:
+            return False
+        if request.status not in billing.PAYABLE:
             out.text(phone, f"That payment request is already {request.status.lower()}.")
             return True
         plans.claim_payment(session, request, at=event.received_at)
@@ -250,21 +351,30 @@ def handle_plan_step(session: Session, event: InboundEvent, conversation: Conver
             session,
             f"💰 Payment claimed: {merchant.shop_name}, {plan.name}, {ugx(request.amount_ugx)}, "
             f"ref {request.momo_reference}, from {local_phone(merchant.phone)}.\n"
-            f"Check MoMo, then: /approve {request.momo_reference} <EFRIS FDN> <verification code>\n"
+            f"Check MoMo, then: /approve {request.momo_reference}\n"
+            f"(add the FDN and code if you've already issued the EFRIS receipt: /approve {request.momo_reference} <FDN> <code>)\n"
             f"or: /reject {request.momo_reference}",
         )
         return True
 
-    if step_of(conversation, "plan:") == "plan:pay" and not is_reset(event):
-        request = session.get(PlanRequest, ctx(conversation).get("request_id") or 0)
-        if request is not None and request.status == PlanRequestStatus.AWAITING_PAYMENT:
-            out.buttons(
-                phone,
-                _payment_instructions(request),
-                [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")],
-            )
+    if step in ("plan:pay", "plan:paying", "plan:manual") and not is_reset(event):
+        request = _own_request(session, merchant, str(ctx(conversation).get("request_id") or ""))
+        if request is not None and request.status in billing.PAYABLE:
+            live = billing.live_deposit(session, request)
+            if live is not None:
+                out.buttons(
+                    phone,
+                    f"⏳ Waiting for you to approve {ugx(request.amount_ugx)} on {local_phone(live.payer_phone)} "
+                    "with your Mobile Money PIN.",
+                    [(f"paynum:{request.id}", "Another number"), ("plan:change", "Change plan")],
+                )
+            elif step == "plan:manual":
+                out.buttons(phone, _payment_instructions(request),
+                            [(f"paid:{request.id}", "I've paid"), ("plan:change", "Change plan")])  # fmt: skip
+            else:
+                _ask_to_pay(session, conversation, merchant, request)
             return True
-    if step_of(conversation, "plan:") == "plan:choose" and not is_reset(event):
+    if step == "plan:choose" and not is_reset(event):
         show_plans(session, conversation, merchant)
         return True
     return False
@@ -283,6 +393,24 @@ def handle_merchant_pending(session: Session, event: InboundEvent, conversation:
         .scalars()
         .first()
     )
+    waiting = (
+        session.execute(
+            select(PlanRequest)
+            .where(PlanRequest.merchant_id == merchant.id, PlanRequest.status == PlanRequestStatus.AWAITING_PAYMENT)
+            .order_by(PlanRequest.id.desc())
+        )
+        .scalars()
+        .first()
+    )
+    live = billing.live_deposit(session, waiting) if waiting is not None else None
+    if live is not None:
+        box(session).buttons(
+            conversation.phone,
+            f"⏳ Waiting for you to approve {ugx(waiting.amount_ugx)} on {local_phone(live.payer_phone)} "
+            "with your Mobile Money PIN. Your plan starts as soon as it's through.",
+            [(f"paynum:{waiting.id}", "Another number"), ("plan:change", "Choose another plan")],
+        )
+        return
     if claimed:
         box(session).buttons(
             conversation.phone,
@@ -309,6 +437,7 @@ def show_menu(
         {"id": "m:cancel", "title": "Cancel an order", "description": "Before the rider picks it up"},
         {"id": "m:plan", "title": "My plan", "description": drops},
         {"id": "m:buy", "title": "Buy or renew plan", "description": "Top up your drops"},
+        {"id": "m:tin", "title": "Tax details (TIN)", "description": merchant.tin or "Optional: for VAT invoices"},
         {"id": "m:help", "title": "Help", "description": "How Men-Ions works"},
     ]
     body = (intro + "\n\n" if intro else "") + f"*{merchant.shop_name}*: what would you like to do?"
@@ -555,6 +684,36 @@ def _plan_status(session: Session, conversation: Conversation, merchant: Merchan
     box(session).buttons(conversation.phone, text, [("m:buy", "Buy or renew plan"), ("m:menu", "Menu")])
 
 
+_TIN = re.compile(r"^\d{10}$")
+
+
+def _tin(session: Session, event: InboundEvent, conversation: Conversation, merchant: Merchant, choice: str) -> None:
+    """Optional: a VAT-registered shop's TIN goes on its EFRIS invoices. Never required."""
+    phone, out = conversation.phone, box(session)
+    if choice == "tin:remove":
+        merchant.tin = None
+        show_menu(session, conversation, merchant, "Your TIN was removed. Receipts will show no TIN.")
+        return
+    if choice == "m:tin":
+        go(conversation, "tin:ask")
+        now = f"Your TIN on file: *{merchant.tin}*.\n\n" if merchant.tin else ""
+        buttons = [("tin:remove", "Remove TIN"), ("m:menu", "Menu")] if merchant.tin else [("m:menu", "Menu")]
+        out.buttons(
+            phone,
+            f"{now}If your shop is registered for VAT, type your *10-digit TIN* and we'll put it on your tax receipts "
+            "so you can claim the VAT. Not registered? You don't need one.",
+            buttons,
+        )
+        return
+    raw = re.sub(r"\s", "", text_of(event))
+    if not _TIN.match(raw):
+        out.buttons(phone, "A TIN is 10 digits, like 1000123456. Type it again, or go back to the menu.",
+                    [("m:menu", "Menu")])  # fmt: skip
+        return
+    merchant.tin = raw
+    show_menu(session, conversation, merchant, f"✅ TIN {raw} saved. It will be on your next tax receipts.")
+
+
 HELP = (
     "*How Men-Ions works*\n"
     "1. Book a delivery here (Menu → Book a delivery).\n"
@@ -590,6 +749,12 @@ def handle_merchant(session: Session, event: InboundEvent, conversation: Convers
         return
     if choice == "m:buy":
         show_plans(session, conversation, merchant)
+        return
+    if choice in ("m:tin", "tin:remove"):
+        _tin(session, event, conversation, merchant, choice)
+        return
+    if step_of(conversation, "tin:") and not is_reset(event):
+        _tin(session, event, conversation, merchant, choice)
         return
     if choice == "m:help":
         box(session).buttons(conversation.phone, HELP, [("m:book", "Book a delivery"), ("m:menu", "Menu")])

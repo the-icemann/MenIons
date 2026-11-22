@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy notice · {{ company.name }}</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #111; background: #fff;
+         max-width: 40rem; margin: 0 auto; padding: 1.25rem 1rem 2rem; line-height: 1.5; }
+  header { border-bottom: 2px solid #111; padding-bottom: .75rem; margin-bottom: 1rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+  .muted { color: #555; font-size: .875rem; margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin: .5rem 0 1rem; font-size: .95rem; }
+  th, td { text-align: left; vertical-align: top; padding: .45rem .5rem .45rem 0; border-bottom: 1px solid #ddd; }
+  th { font-weight: 600; }
+  ul { padding-left: 1.2rem; }
+  li { margin: .3rem 0; }
+  footer { margin-top: 2rem; padding-top: .75rem; border-top: 1px solid #ddd; font-size: .8rem; color: #555; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Privacy notice</h1>
+  <p class="muted">{{ company.name }}{% if company.address %} · {{ company.address }}{% endif %}{% if company.tin %} · TIN {{ company.tin }}{% endif %}</p>
+</header>
+
+<p>{{ company.name }} delivers parcels for shops in Kampala, booked on WhatsApp. This notice explains what
+personal data we hold, why, and for how long, as the Data Protection and Privacy Act, 2019 requires.</p>
+
+<h2>What we collect and why</h2>
+<table>
+  <tr><th scope="col">Who</th><th scope="col">What</th><th scope="col">Why</th></tr>
+  <tr><td>Shops</td><td>Shop name, owner's name, phone number, what you sell, pickup location and directions, your TIN if you give it, plan payments</td><td>To run your account, send riders to you, take plan payments and issue tax receipts</td></tr>
+  <tr><td>Customers of a shop</td><td>Your name and phone number (given to us by the shop), the delivery location and directions you share, your delivery code</td><td>Only to deliver the parcel the shop sent you</td></tr>
+  <tr><td>Riders</td><td>Name, phone number, driving permit number, national ID number, number plate</td><td>To offer you jobs and to show riders are properly checked</td></tr>
+  <tr><td>Everyone</td><td>The WhatsApp messages you send us, and photos of parcels at pickup and delivery</td><td>To run the service and settle disputes about a delivery</td></tr>
+</table>
+
+<h2>Who else sees it</h2>
+<ul>
+  <li>The rider doing a delivery sees the shop's pickup details and the customer's name, number and location.</li>
+  <li>The shop sees the progress of its own deliveries.</li>
+  <li>Service providers that carry the data for us: Meta (WhatsApp) and Kapso for messages, pawaPay and the
+      mobile networks for payments, and our hosting provider. Some of them store data outside Uganda.</li>
+  <li>The Uganda Revenue Authority receives the details on each tax receipt (EFRIS).</li>
+</ul>
+<p>We do not sell personal data or use it for advertising.</p>
+
+<h2>How long we keep it</h2>
+<ul>
+  <li>Customers' locations and directions, parcel photos and the raw WhatsApp messages are deleted
+      <strong>{{ retention_days }} days</strong> after a delivery is finished.</li>
+  <li>Receipts are financial records. They cannot be changed or deleted and are kept for as long as tax law
+      requires.</li>
+  <li>Payment records are kept for the same reason.</li>
+</ul>
+
+<h2>Your rights</h2>
+<p>You can ask us what we hold about you, to correct it, or to delete it. We delete everything except
+receipts and payment records, which the law requires us to keep.
+{% if contact %}Contact us: <strong>{{ contact }}</strong>.{% else %}Message us on WhatsApp.{% endif %}</p>
+
+<footer>
+  <p>Last updated {{ updated }}.</p>
+</footer>
+</body>
+</html>
