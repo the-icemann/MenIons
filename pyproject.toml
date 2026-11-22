@@ -20,3 +20,4 @@ ignore = ["B008"]  # FastAPI's Depends(...) defaults
 "tests/*" = ["E501"]
 "alembic/versions/*" = ["E501"]
 "app/bots/*" = ["E501"]  # user-facing message text reads better unwrapped
+"app/billing.py" = ["E501"]  # same: messages to merchants and admins

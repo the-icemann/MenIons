@@ -100,14 +100,17 @@ def test_approve_activates_plan_and_merchant_once(session):
     assert request.status == PlanRequestStatus.PAYMENT_CLAIMED and request.paid_claimed_at == T0
 
     approved_at = T0 + timedelta(minutes=5)
-    receipt = plans.approve_plan_request(
+    approval = plans.approve_plan_request(
         session, request, "admin-1", approved_at, efris_fdn="FDN123", efris_verification_code="VC456"
     )
+    assert approval.was_pending
     assert request.status == PlanRequestStatus.APPROVED and request.approved_by == "admin-1"
     assert merchant.status == MerchantStatus.ACTIVE
     assert (merchant.plan, merchant.drops_left, merchant.plan_starts) == ("weekly_gold", 20, approved_at)
+    receipt = approval.receipt
     assert receipt.type == "plan_purchase" and receipt.amount_ugx == 35_000
     assert (receipt.efris_fdn, receipt.efris_verification_code) == ("FDN123", "VC456")
+    assert (approval.fiscal.status, approval.fiscal.fdn, approval.fiscal.receipt_id) == ("ISSUED", "FDN123", receipt.id)
 
     # Approving again changes nothing: no second receipt, no reset of used drops or dates.
     merchant.drops_left = 14
@@ -126,10 +129,21 @@ def test_admin_can_approve_before_the_merchant_claims(session):
     assert merchant.status == MerchantStatus.ACTIVE
 
 
-def test_approval_without_efris_numbers_is_refused_and_changes_nothing(session):
+def test_approval_without_the_fdn_starts_the_plan_and_owes_efris(session):
+    """URA allows 24 hours: the plan starts now, the receipt waits for the FDN."""
     merchant = make_merchant(session, plan=None, status=MerchantStatus.PENDING)
     request = plans.create_plan_request(session, merchant, "weekly_gold", T0)
-    for fdn, code in [("", "VC"), ("FDN", ""), ("  ", "  "), (None, None)]:
+    approval = plans.approve_plan_request(session, request, "a", T0)
+    assert merchant.status == MerchantStatus.ACTIVE and merchant.drops_left == 20
+    assert approval.receipt is None
+    assert (approval.fiscal.status, approval.fiscal.reference) == ("PENDING", request.momo_reference)
+    assert session.query(Receipt).count() == 0
+
+
+def test_half_the_efris_numbers_is_refused_and_changes_nothing(session):
+    merchant = make_merchant(session, plan=None, status=MerchantStatus.PENDING)
+    request = plans.create_plan_request(session, merchant, "weekly_gold", T0)
+    for fdn, code in [("", "VC"), ("FDN", ""), ("FDN", "  ")]:
         with pytest.raises(plans.PlanError, match="EFRIS"):
             plans.approve_plan_request(session, request, "a", T0, efris_fdn=fdn, efris_verification_code=code)
     session.refresh(request)

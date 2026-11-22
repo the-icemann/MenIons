@@ -219,9 +219,7 @@ def mark_sent(session: Session, receipt: Receipt, at: datetime | None = None) ->
         session.flush()
 
 
-def void_receipt(
-    session: Session, receipt: Receipt, reason: str, admin_id: str, at: datetime | None = None
-) -> Receipt:
+def void_receipt(session: Session, receipt: Receipt, reason: str, admin_id: str, at: datetime | None = None) -> Receipt:
     """Correct a receipt by issuing a void notice. The original stays exactly as it was."""
     reason = (reason or "").strip()
     if not reason:
@@ -296,8 +294,13 @@ def issue_for_transition(
         notes = ["The parcel was not delivered. This drop stays used; a reschedule does not use another."]
         return [
             issue_receipt(
-                session, ReceiptType.FAILED_DELIVERY_MERCHANT, to_merchant, links, None,
-                {"lines": lines, "notes": notes}, at=at,
+                session,
+                ReceiptType.FAILED_DELIVERY_MERCHANT,
+                to_merchant,
+                links,
+                None,
+                {"lines": lines, "notes": notes},
+                at=at,
             )
         ]
 
@@ -364,28 +367,36 @@ def issue_plan_purchase(
     request: PlanRequest,
     plan_name: str,
     drops: int,
+    valid_until: datetime,
+    paid_with: str,
     efris_fdn: str,
     efris_verification_code: str,
     at: datetime,
 ) -> Receipt:
+    """Issued once URA's FDN is known, which can be a little after the plan started (so the
+    dates come from the request, not from the merchant's current plan)."""
+    lines = [
+        ["Plan", plan_name],
+        ["Drops", str(drops)],
+        ["Paid", format_kampala(request.approved_at)],
+        ["Paid with", paid_with],
+        ["Payment reference", request.momo_reference],
+        ["Plan valid from", format_kampala(request.approved_at)],
+        ["Plan valid until", format_kampala(valid_until)],
+    ]
+    if merchant.tin:
+        lines.append(["Buyer TIN", merchant.tin])
+    lines += [
+        ["EFRIS FDN", efris_fdn],
+        ["EFRIS verification code", efris_verification_code],
+    ]
     return issue_receipt(
         session,
         ReceiptType.PLAN_PURCHASE,
         Recipient("merchant", merchant.phone, merchant.shop_name),
         Links(plan_request_id=request.id),
         request.amount_ugx,
-        {
-            "lines": [
-                ["Plan", plan_name],
-                ["Drops", str(drops)],
-                ["Valid from", format_kampala(merchant.plan_starts)],
-                ["Valid until", format_kampala(merchant.plan_ends)],
-                ["Mobile Money reference", request.momo_reference],
-                ["EFRIS FDN", efris_fdn],
-                ["EFRIS verification code", efris_verification_code],
-                ["Approved by", str(request.approved_by)],
-            ],
-        },
+        {"lines": lines},
         at=at,
         efris_fdn=efris_fdn,
         efris_verification_code=efris_verification_code,
@@ -643,4 +654,3 @@ def view_receipt(
         },
         headers={"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex"},
     )
-
