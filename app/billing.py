@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -238,9 +239,10 @@ def fdn_recorded(session: Session, doc: FiscalDocument, receipt: Receipt | None)
         send_receipts(session, [receipt], plans.get_plan(request.plan).name)
 
 
-def fiscalise_pending(session: Session, now: datetime | None = None) -> int:
-    """Automatic EFRIS providers: issue every document that is due. Each in its own
-    savepoint, with a growing wait after each failure. Returns how many were issued."""
+def fiscalise_pending(session: Session, now: datetime | None = None, checkpoint=None) -> int:
+    """Automatic EFRIS providers: issue every document that is due, each on its own (the
+    worker commits after each, so an FDN URA has issued is never rolled back), with a
+    growing wait after each failure. Returns how many were issued."""
     provider = efris.get_provider()
     if not provider.automatic:
         return 0
@@ -260,11 +262,26 @@ def fiscalise_pending(session: Session, now: datetime | None = None) -> int:
             doc.last_error = str(exc)[:500]
             doc.next_attempt_at = now + timedelta(minutes=min(2**doc.attempts, 60))
             session.flush()
+            _done_item(session, checkpoint)
             continue
-        with session.begin_nested():
-            receipt = record_fdn(session, doc, result.fdn, result.verification_code, "efris", now, result.qr_code)
-            fdn_recorded(session, doc, receipt)
-        issued += 1
+        reference = doc.reference
+        try:
+            with session.begin_nested():
+                receipt = record_fdn(session, doc, result.fdn, result.verification_code, "efris", now, result.qr_code)
+                fdn_recorded(session, doc, receipt)
+            issued += 1
+        except Exception as exc:  # noqa: BLE001 - URA issued it: a person must reconcile it
+            log.exception("EFRIS issued %s for %s but it could not be recorded", result.fdn, reference)
+            stuck = session.execute(select(FiscalDocument).where(FiscalDocument.reference == reference)).scalar_one()
+            stuck.next_attempt_at = None  # never ask URA again on our own: that would issue a duplicate
+            stuck.last_error = f"EFRIS issued {result.fdn}; not recorded: {exc}"[:500]
+            session.add(AdminAlert(kind="efris_unrecorded", at=now, data={"reference": reference, "fdn": result.fdn}))
+            notify_admins(
+                session,
+                f"⚠️ EFRIS issued FDN {result.fdn} for {reference}, but we couldn't record it ({exc}). "
+                "Check it on URA's portal: a credit note may be needed.",
+            )
+        _done_item(session, checkpoint)
     return issued
 
 
@@ -299,7 +316,10 @@ def alert_stale_fiscal(session: Session, now: datetime | None = None) -> int:
 @dataclass(frozen=True)
 class Started:
     deposit: Deposit | None
-    failure_code: str | None  # None: the PIN prompt is on its way
+    failure_code: str | None  # None: recorded, and sent to pawaPay once the caller commits
+
+
+SEND_QUEUE = "deposits_to_send"
 
 
 def _customer_message(request: PlanRequest) -> str:
@@ -316,25 +336,36 @@ def live_deposit(session: Session, request: PlanRequest) -> Deposit | None:
     ).scalars().first()  # fmt: skip
 
 
-def start_deposit(session: Session, request: PlanRequest, phone: str, at: datetime | None = None) -> Started:
-    """Ask pawaPay to send a PIN prompt to `phone` for this plan request.
+def merchant_live_deposit(session: Session, merchant_id: int) -> Deposit | None:
+    """A payment of this merchant's that is still under way, for any of their plan requests."""
+    return session.execute(
+        select(Deposit)
+        .join(PlanRequest, PlanRequest.id == Deposit.plan_request_id)
+        .where(PlanRequest.merchant_id == merchant_id, Deposit.status.in_(LIVE_DEPOSIT))
+        .order_by(Deposit.id.desc())
+    ).scalars().first()  # fmt: skip
 
-    The deposit row is written before pawaPay is called, so a lost answer can be checked
-    later by its id. Only one attempt runs at a time per request.
+
+def start_deposit(session: Session, request: PlanRequest, phone: str, at: datetime | None = None) -> Started:
+    """Record an attempt to collect this plan request from `phone` (INITIATED).
+
+    pawaPay is NOT called here. The webhook commits first and then calls
+    send_queued_deposits(), so the deposit row exists before pawaPay hears of it (a lost
+    answer can always be checked by its id) and no row is locked during the HTTP call.
+    One payment at a time per merchant: a second PIN prompt could charge them twice.
     """
     at = _now(at)
-    gateway = get_gateway()
+    session.flush()
+    session.execute(
+        select(Merchant.id).where(Merchant.id == request.merchant_id).with_for_update()
+    )  # serialises attempts per merchant
     request = _lock(session, PlanRequest, request.id)
     if request.status not in PAYABLE:
         raise BillingError(f"request is {request.status}; it can't be paid")
-    live = live_deposit(session, request)
+    live = merchant_live_deposit(session, request.merchant_id)
     if live is not None:
         return Started(live, "PAYMENT_IN_PROGRESS")
-
-    try:
-        provider = gateway.predict_provider(phone) or provider_from_prefix(phone)
-    except GatewayError:
-        provider = provider_from_prefix(phone)
+    provider = provider_from_prefix(phone)
     if provider not in PROVIDER_NAMES:
         return Started(None, "UNSUPPORTED_NETWORK")
 
@@ -350,31 +381,95 @@ def start_deposit(session: Session, request: PlanRequest, phone: str, at: dateti
     )
     session.add(deposit)
     session.flush()
-    try:
-        result = gateway.initiate_deposit(
-            deposit.deposit_id, deposit.amount_ugx, phone, provider, _customer_message(request)
-        )
-    except GatewayError:
-        log.exception("deposit %s: initiate failed; the worker will check its status", deposit.deposit_id)
-        return Started(deposit, "GATEWAY_ERROR")
-    if result.status == "REJECTED":
-        deposit.status, deposit.failure_code = DepositStatus.FAILED, result.failure_code or "REJECTED"
-        session.flush()
-        return Started(deposit, deposit.failure_code)
-    deposit.status = DepositStatus.ACCEPTED
-    session.flush()
+    session.info.setdefault(SEND_QUEUE, []).append(deposit.id)
     return Started(deposit, None)
+
+
+def queued_deposits(session: Session) -> list[int]:
+    return session.info.setdefault(SEND_QUEUE, [])
+
+
+def take_queued_deposits(session: Session) -> list[int]:
+    return session.info.pop(SEND_QUEUE, None) or []
+
+
+def send_queued_deposits(session: Session, deposit_ids: list[int], now: datetime | None = None) -> None:
+    """Ask pawaPay to send the PIN prompts recorded by start_deposit(). Call only after the
+    deposits are committed. Commits after each one and queues the merchant's message."""
+    if not deposit_ids:
+        return
+    gateway = get_gateway()
+    for deposit_id in deposit_ids:
+        deposit = session.get(Deposit, deposit_id, populate_existing=True)
+        if deposit is None or deposit.status != DepositStatus.INITIATED:
+            continue
+        request = session.get(PlanRequest, deposit.plan_request_id)
+        merchant = _merchant(session, request)
+        try:
+            predicted = gateway.predict_provider(deposit.payer_phone)
+        except GatewayError:
+            predicted = None
+        if predicted in PROVIDER_NAMES:
+            deposit.provider = predicted
+        session.commit()
+        try:
+            result = gateway.initiate_deposit(
+                deposit.deposit_id,
+                deposit.amount_ugx,
+                deposit.payer_phone,
+                deposit.provider,
+                _customer_message(request),
+            )
+        except GatewayError:
+            log.exception("deposit %s: initiate failed; the worker will check its status", deposit.deposit_id)
+            box(session).text(
+                merchant.phone,
+                "We couldn't reach Mobile Money just now. If a PIN prompt arrives, approve it. "
+                "Otherwise we'll message you in a few minutes so you can try again.",
+            )
+            continue
+        deposit = _lock(session, Deposit, deposit.id)
+        if deposit.status == DepositStatus.INITIATED:  # a callback may already have settled it
+            if result.status == "REJECTED":
+                deposit.status, deposit.failure_code = DepositStatus.FAILED, result.failure_code or "REJECTED"
+                box(session).buttons(
+                    merchant.phone, f"❌ {failure_text(deposit.failure_code)}", retry_buttons(request, deposit)
+                )
+            else:
+                deposit.status = DepositStatus.ACCEPTED
+                network = PROVIDER_NAMES.get(deposit.provider, "Mobile Money")
+                box(session).text(
+                    merchant.phone,
+                    f"📲 Check the phone {local_phone(deposit.payer_phone)}: approve {ugx(deposit.amount_ugx)} to "
+                    f"Men-Ions with your {network} PIN.\n\nWe'll message you here the moment it's through.",
+                )
+            deposit.updated_at = _now(now)
+        session.commit()
 
 
 def failure_text(code: str | None) -> str:
     return FAILURE_TEXT.get(code or "", DEFAULT_FAILURE)
 
 
-def retry_buttons(request: PlanRequest) -> list[tuple[str, str]]:
+def retry_buttons(request: PlanRequest, failed: Deposit | None = None) -> list[tuple[str, str]]:
+    """Try again (the same phone as the failed attempt), another number, or pay by hand.
+    The phone is in the button itself, never taken from the conversation."""
+    again = f"retry:{failed.id}" if failed is not None else f"pay:{request.id}"
     third = (
         (f"manual:{request.id}", "Pay by hand") if get_settings().momo_pay_number else ("plan:change", "Change plan")
     )
-    return [(f"pay:{request.id}", "Try again"), (f"paynum:{request.id}", "Another number"), third]
+    return [(again, "Try again"), (f"paynum:{request.id}", "Another number"), third]
+
+
+def waiting_message(deposit: Deposit) -> tuple[str, list[tuple[str, str]]]:
+    """What a merchant sees while a PIN prompt is pending. No other payment can start until
+    it ends: pawaPay can't cancel a prompt, so a second one could charge twice."""
+    return (
+        f"⏳ Waiting for you to approve {ugx(deposit.amount_ugx)} on {local_phone(deposit.payer_phone)} with your "
+        "Mobile Money PIN.\n\nWrong phone, or no prompt? It expires by itself within a few minutes, then you can "
+        "pay again from any number. We'll message you.",
+        [(f"chk:{deposit.id}", "Check payment")],
+    )
 
 
 def approving_deposit(session: Session, request: PlanRequest) -> Deposit | None:
@@ -412,6 +507,12 @@ def settle_deposit(session: Session, deposit: Deposit, tx: Transaction, at: date
         if deposit.status == DepositStatus.INITIATED and at - deposit.created_at > timedelta(minutes=2):
             deposit.status, deposit.failure_code = DepositStatus.FAILED, "NOT_FOUND"
             session.flush()
+            if request.status in PAYABLE:
+                box(session).buttons(
+                    merchant.phone,
+                    "Mobile Money didn't receive your payment request, so no money was taken. Please try again.",
+                    retry_buttons(request, deposit),
+                )
             return "failed"
         session.flush()
         return "pending"
@@ -429,7 +530,7 @@ def settle_deposit(session: Session, deposit: Deposit, tx: Transaction, at: date
                 merchant.phone,
                 f"❌ {failure_text(deposit.failure_code)}\n\nYour {plans.get_plan(request.plan).name} plan "
                 f"({ugx(request.amount_ugx)}) is not paid yet.",
-                retry_buttons(request),
+                retry_buttons(request, deposit),
             )
         return "failed"
 
@@ -453,6 +554,11 @@ def settle_deposit(session: Session, deposit: Deposit, tx: Transaction, at: date
             f"⚠️ Payment for {request.momo_reference} came in as {tx.currency} {tx.amount}, not {ugx(deposit.amount_ugx)}. "
             f"The plan was NOT started. Check pawaPay, send it back with /refund {request.momo_reference} extra, "
             "and ask the shop to pay again.",
+        )
+        box(session).text(
+            merchant.phone,
+            f"Your payment for {request.momo_reference} came through as {tx.currency} {tx.amount} instead of "
+            f"{ugx(deposit.amount_ugx)}, so your plan hasn't started yet. We'll contact you to sort it out.",
         )
         return "mismatch"
 
@@ -507,7 +613,17 @@ def check_deposit(session: Session, deposit: Deposit, at: datetime | None = None
     return settle_deposit(session, deposit, get_gateway().get_deposit(deposit.deposit_id), at)
 
 
-def poll_deposits(session: Session, now: datetime | None = None) -> int:
+Checkpoint = Callable[[Session], None]
+
+
+def _done_item(session: Session, checkpoint: Checkpoint | None) -> None:
+    """After each item of a batch: the worker commits and sends here, so no lock taken for
+    one item is held through the network calls for the next."""
+    if checkpoint is not None:
+        checkpoint(session)
+
+
+def poll_deposits(session: Session, now: datetime | None = None, checkpoint: Checkpoint | None = None) -> int:
     """Backstop for missed callbacks: check every unfinished deposit older than a minute."""
     now = _now(now)
     rows = session.execute(
@@ -519,11 +635,15 @@ def poll_deposits(session: Session, now: datetime | None = None) -> int:
     done = 0
     for deposit in rows:
         try:
+            tx = get_gateway().get_deposit(deposit.deposit_id)  # no lock held during the call
             with session.begin_nested():
-                if check_deposit(session, deposit, now) != "pending":
+                if settle_deposit(session, deposit, tx, now) != "pending":
                     done += 1
         except GatewayError:
             log.warning("deposit %s: status check failed; next round", deposit.deposit_id)
+        except Exception:  # noqa: BLE001 - one bad row must not stop the rest
+            log.exception("deposit %s: settling failed", deposit.deposit_id)
+        _done_item(session, checkpoint)
     return done
 
 
@@ -690,7 +810,7 @@ def _refund_failed(session: Session, refund: Refund) -> None:
     )
 
 
-def poll_refunds(session: Session, now: datetime | None = None) -> int:
+def poll_refunds(session: Session, now: datetime | None = None, checkpoint: Checkpoint | None = None) -> int:
     now = _now(now)
     rows = session.execute(
         select(Refund)
@@ -701,11 +821,15 @@ def poll_refunds(session: Session, now: datetime | None = None) -> int:
     done = 0
     for refund in rows:
         try:
+            tx = get_gateway().get_refund(refund.refund_id)  # no lock held during the call
             with session.begin_nested():
-                if settle_refund(session, refund, get_gateway().get_refund(refund.refund_id), now) != "pending":
+                if settle_refund(session, refund, tx, now) != "pending":
                     done += 1
         except GatewayError:
             log.warning("refund %s: status check failed; next round", refund.refund_id)
+        except Exception:  # noqa: BLE001
+            log.exception("refund %s: settling failed", refund.refund_id)
+        _done_item(session, checkpoint)
     return done
 
 

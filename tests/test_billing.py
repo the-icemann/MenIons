@@ -35,11 +35,16 @@ def fake_provider():
     messaging.set_provider(None)
 
 
+TOKEN = "test-callback-token-0123"
+CALLBACK = f"/webhooks/pawapay?k={TOKEN}"
+
+
 @pytest.fixture
 def gateway(monkeypatch):
     gw = FakeGateway()
     payments.set_gateway(gw)
     monkeypatch.setattr(get_settings(), "payments_provider", "pawapay")
+    monkeypatch.setattr(get_settings(), "pawapay_callback_token", TOKEN)
     yield gw
     payments.set_gateway(None)
 
@@ -70,6 +75,10 @@ def choose_and_pay(session, merchant, plan="weekly_gold"):
         select(PlanRequest).where(PlanRequest.merchant_id == merchant.id).order_by(PlanRequest.id.desc())
     ).scalars().first()  # fmt: skip
     return request, out
+
+
+def only_live(session) -> Deposit:
+    return session.execute(select(Deposit).where(Deposit.status == "ACCEPTED")).scalars().one()
 
 
 def only_deposit(session, request) -> Deposit:
@@ -131,20 +140,29 @@ def test_paying_from_another_number(session, gateway):
 def test_a_failed_payment_explains_why_and_can_be_retried(session, gateway):
     merchant = new_shop(session)
     request, _ = choose_and_pay(session, merchant)
-    tap(session, merchant.phone, f"pay:{request.id}")
+    tap(session, merchant.phone, f"paynum:{request.id}")
+    say(session, merchant.phone, "0772 999888")  # a relative's phone
     first = only_deposit(session, request)
     gateway.fail(first.deposit_id, "INSUFFICIENT_BALANCE")
     result, out = run(session, billing.check_deposit, first)
     assert result == "failed" and first.failure_code == "INSUFFICIENT_BALANCE"
     assert "enough money" in body(out, merchant.phone)
-    assert (f"pay:{request.id}", "Try again") in buttons(out, merchant.phone)
+    assert (f"retry:{first.id}", "Try again") in buttons(out, merchant.phone)
     assert (f"manual:{request.id}", "Pay by hand") in buttons(out, merchant.phone)
     assert merchant.status == MerchantStatus.PENDING and request.status == "AWAITING_PAYMENT"
 
-    tap(session, merchant.phone, f"pay:{request.id}")
+    say(session, merchant.phone, "menu")  # the conversation is reset; the button still knows the phone
+    tap(session, merchant.phone, f"retry:{first.id}")
     attempts = session.execute(select(Deposit).where(Deposit.plan_request_id == request.id)).scalars().all()
-    assert len(attempts) == 2 and attempts[1].status == "ACCEPTED"
+    assert len(attempts) == 2 and (attempts[1].status, attempts[1].payer_phone) == ("ACCEPTED", "+256772999888")
+    gateway.fail(attempts[1].deposit_id, "PAYMENT_NOT_APPROVED")
+    run(session, billing.check_deposit, attempts[1])
 
+    tap(session, merchant.phone, f"pay:{request.id}")  # "Pay from this phone" is always the shop's own phone
+    assert session.execute(select(Deposit).order_by(Deposit.id.desc())).scalars().first().payer_phone == merchant.phone
+
+    gateway.fail(session.execute(select(Deposit).order_by(Deposit.id.desc())).scalars().first().deposit_id)
+    run(session, billing.poll_deposits, T0 + timedelta(days=1))
     out = tap(session, merchant.phone, f"manual:{request.id}")
     assert request.momo_reference in body(out, merchant.phone) and "0700000099" in body(out, merchant.phone)
 
@@ -157,7 +175,10 @@ def test_rejected_at_once_and_one_attempt_at_a_time(session, gateway):
     assert "isn't registered for Mobile Money" in body(out, merchant.phone)
     tap(session, merchant.phone, f"pay:{request.id}")
     out = tap(session, merchant.phone, f"pay:{request.id}")
-    assert "already waiting" in body(out, merchant.phone)
+    assert "Waiting for you to approve" in body(out, merchant.phone)
+    assert buttons(out, merchant.phone) == [(f"chk:{only_live(session).id}", "Check payment")]
+    out = tap(session, merchant.phone, f"paynum:{request.id}")  # can't start a second prompt either
+    assert "Waiting for you to approve" in body(out, merchant.phone)
     assert len(gateway.deposits) == 1
 
 
@@ -182,8 +203,10 @@ def test_gateway_down_then_never_received(session, gateway):
         run(session, billing.poll_deposits, deposit.created_at + timedelta(seconds=90))[0] == 0
     )  # too soon to give up
     assert deposit.status == "INITIATED"
-    run(session, billing.poll_deposits, deposit.created_at + timedelta(minutes=5))
+    _, out = run(session, billing.poll_deposits, deposit.created_at + timedelta(minutes=5))
     assert (deposit.status, deposit.failure_code) == ("FAILED", "NOT_FOUND")
+    assert "no money was taken" in body(out, merchant.phone)
+    assert (f"retry:{deposit.id}", "Try again") in buttons(out, merchant.phone)
 
 
 def test_a_wrong_amount_does_not_start_the_plan(session, gateway):
@@ -194,7 +217,7 @@ def test_a_wrong_amount_does_not_start_the_plan(session, gateway):
     gateway.complete(deposit.deposit_id, amount="3500")
     result, out = run(session, billing.check_deposit, deposit)
     assert result == "mismatch" and merchant.status == MerchantStatus.PENDING
-    assert "NOT started" in body(out, ADMIN)
+    assert "NOT started" in body(out, ADMIN) and "hasn't started" in body(out, merchant.phone)
     assert session.scalar(select(AdminAlert.id).where(AdminAlert.kind == "payment_amount_mismatch"))
 
 
@@ -221,11 +244,11 @@ def test_callback_checks_with_pawapay_and_starts_the_plan(session, client, gatew
 
     # A callback claiming success means nothing until pawaPay itself says so.
     fake = {"depositId": deposit.deposit_id, "status": "COMPLETED", "amount": "35000", "currency": "UGX"}
-    assert client.post("/webhooks/pawapay", json=fake).status_code == 200
+    assert client.post(CALLBACK, json=fake).status_code == 200
     assert merchant.status == MerchantStatus.PENDING and deposit.status == "ACCEPTED"
 
     gateway.complete(deposit.deposit_id)
-    assert client.post("/webhooks/pawapay", json=fake).status_code == 200
+    assert client.post(CALLBACK, json=fake).status_code == 200
     session.refresh(merchant)
     assert merchant.status == MerchantStatus.ACTIVE and merchant.plan == "weekly_gold"
 
@@ -236,23 +259,29 @@ def test_callback_when_pawapay_is_unreachable_asks_for_a_retry(session, client, 
     tap(session, merchant.phone, f"pay:{request.id}")
     deposit = only_deposit(session, request)
     gateway.down = True
-    response = client.post("/webhooks/pawapay", json={"depositId": deposit.deposit_id, "status": "COMPLETED"})
+    response = client.post(CALLBACK, json={"depositId": deposit.deposit_id, "status": "COMPLETED"})
     assert response.status_code == 503
 
 
 def test_callback_for_a_deposit_we_never_made_alerts_admins(session, client, gateway):
-    response = client.post(
-        "/webhooks/pawapay", json={"depositId": "0b5c5a3e-0000-4000-8000-000000000000", "status": "COMPLETED"}
-    )
-    assert response.status_code == 200
-    assert session.scalar(select(AdminAlert.id).where(AdminAlert.kind == "unknown_deposit"))
+    unknown = {"depositId": "0b5c5a3e-0000-4000-8000-000000000000", "status": "COMPLETED"}
+    assert client.post(CALLBACK, json=unknown).status_code == 200
+    assert client.post(CALLBACK, json=unknown).json()["duplicate"]  # a replay is ignored
+    alerts = session.execute(select(AdminAlert).where(AdminAlert.kind == "unknown_deposit")).scalars().all()
+    assert len(alerts) == 1
 
 
-def test_callback_token(session, client, gateway, monkeypatch):
-    monkeypatch.setattr(get_settings(), "pawapay_callback_token", "s3cret")
+def test_callback_token_is_required(session, client, gateway, monkeypatch):
     assert client.post("/webhooks/pawapay", json={}).status_code == 403
-    assert client.post("/webhooks/pawapay?k=s3cret", json={}).status_code == 200
-    assert client.post("/webhooks/pawapay?k=s3cret", content=b"nope").status_code == 400
+    assert client.post("/webhooks/pawapay?k=wrong", json={}).status_code == 403
+    assert client.post(CALLBACK, json={}).status_code == 200
+    assert client.post(CALLBACK, content=b"nope").status_code == 400
+    monkeypatch.setattr(get_settings(), "pawapay_callback_token", "")
+    assert client.post("/webhooks/pawapay?k=", json={}).status_code == 403
+
+
+def test_callbacks_are_off_when_pawapay_is(session, client):
+    assert client.post("/webhooks/pawapay?k=anything", json={"depositId": "x"}).status_code == 404
 
 
 # --- EFRIS ---------------------------------------------------------------------------------------
@@ -461,6 +490,109 @@ def test_settings_refuse_unsafe_payment_config():
     from app.config import Settings
 
     with pytest.raises(ValueError, match="PAWAPAY_API_TOKEN"):
-        Settings(payments_provider="pawapay", pawapay_api_token="")
+        Settings(payments_provider="pawapay", pawapay_api_token="", pawapay_callback_token="x" * 20)
+    with pytest.raises(ValueError, match="PAWAPAY_CALLBACK_TOKEN"):
+        Settings(payments_provider="pawapay", pawapay_api_token="t", pawapay_callback_token="short")
     with pytest.raises(ValueError, match="EFRIS_PROVIDER=fake"):
         Settings(env="production", efris_provider="fake", whatsapp_webhook_signature="kapso", kapso_webhook_secret="x")
+
+
+# --- Review fixes: one payment at a time, manual mode, batches --------------------------------------
+
+
+def test_no_second_plan_while_a_prompt_is_pending_and_old_choices_close(session, gateway):
+    merchant = new_shop(session)
+    first, _ = choose_and_pay(session, merchant, "weekly_gold")
+    tap(session, merchant.phone, f"pay:{first.id}")
+    out = pick(session, merchant.phone, "plan:daily_bronze")  # "Change plan" mid-payment
+    assert "Waiting for you to approve" in body(out, merchant.phone)
+    assert session.query(PlanRequest).filter_by(merchant_id=merchant.id).count() == 1
+
+    deposit = only_deposit(session, first)
+    gateway.fail(deposit.deposit_id, "PAYMENT_NOT_APPROVED")
+    run(session, billing.check_deposit, deposit)
+    second, _ = choose_and_pay(session, merchant, "daily_bronze")
+    assert second.id != first.id and first.status == "REJECTED" and first.approved_by == "superseded"
+    out = tap(session, merchant.phone, f"pay:{first.id}")  # an old button can't charge the old plan
+    assert "already rejected" in body(out, merchant.phone) and len(gateway.deposits) == 1
+
+
+def test_check_payment_button(session, gateway):
+    merchant = new_shop(session)
+    request, _ = choose_and_pay(session, merchant)
+    tap(session, merchant.phone, f"pay:{request.id}")
+    deposit = only_deposit(session, request)
+    out = tap(session, merchant.phone, f"chk:{deposit.id}")
+    assert "Waiting for you to approve" in body(out, merchant.phone)
+    gateway.complete(deposit.deposit_id)
+    out = tap(session, merchant.phone, f"chk:{deposit.id}")
+    assert merchant.status == MerchantStatus.ACTIVE and "Payment received" in body(out, merchant.phone)
+
+
+def test_manual_mode_never_reaches_pawapay(session, monkeypatch):
+    """Including a merchant whose saved step is the pre-upgrade "plan:pay" (the old manual step)."""
+    broken = FakeGateway()
+    broken.down = True
+    payments.set_gateway(broken)
+    try:
+        merchant = new_shop(session)
+        request = plans.create_plan_request(session, merchant, "weekly_gold", T0)
+        say(session, merchant.phone, "hi")
+        from app.models import Conversation
+
+        conversation = session.get(Conversation, merchant.phone)
+        conversation.step, conversation.context = "plan:pay", {"request_id": request.id}
+        session.flush()
+        out = say(session, merchant.phone, "how do I pay?")
+        assert "I've paid" in str(buttons(out, merchant.phone)) and request.momo_reference in body(out)
+        out = tap(session, merchant.phone, f"pay:{request.id}")
+        assert "I've paid" in str(buttons(out, merchant.phone))
+        assert session.query(Deposit).count() == 0
+    finally:
+        payments.set_gateway(None)
+
+
+def test_batches_checkpoint_after_each_item_and_survive_a_bad_one(session, gateway, monkeypatch):
+    merchants = [new_shop(session, phone=f"+25677200011{i}") for i in range(3)]
+    deposits = []
+    for m in merchants:
+        request, _ = choose_and_pay(session, m)
+        tap(session, m.phone, f"pay:{request.id}")
+        deposits.append(only_deposit(session, request))
+        gateway.complete(deposits[-1].deposit_id)
+    real = billing.settle_deposit
+
+    def flaky(s, deposit, tx, at=None):
+        if deposit.id == deposits[1].id:
+            raise RuntimeError("boom")
+        return real(s, deposit, tx, at)
+
+    monkeypatch.setattr(billing, "settle_deposit", flaky)
+    checkpoints = []
+    done = billing.poll_deposits(session, T0 + timedelta(minutes=5), lambda s: checkpoints.append(1))
+    assert done == 2 and len(checkpoints) == 3
+    assert [m.status for m in merchants] == [MerchantStatus.ACTIVE, MerchantStatus.PENDING, MerchantStatus.ACTIVE]
+
+
+def test_an_fdn_that_cannot_be_recorded_alerts_and_is_never_reissued(session):
+    efris.set_provider(efris.FakeEfris())
+    _, request, doc = _approved(session)
+    other_merchant = new_shop(session, phone="+256772000999")
+    other = plans.create_plan_request(session, other_merchant, "daily_gold", T0)
+    other_doc = plans.approve_plan_request(session, other, "admin", T0).fiscal
+    real = billing.record_fdn
+
+    def refuse(s, d, *args, **kwargs):
+        if d.id == doc.id:
+            raise billing.BillingError("cancelled meanwhile")
+        return real(s, d, *args, **kwargs)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(billing, "record_fdn", refuse):
+        issued, out = run(session, billing.fiscalise_pending, T0)
+    assert issued == 1 and other_doc.status == "ISSUED"
+    session.refresh(doc)
+    assert doc.status == "PENDING" and doc.next_attempt_at is None and "TEST-" in doc.last_error
+    assert "couldn't record it" in body(out, ADMIN)
+    assert run(session, billing.fiscalise_pending, T0 + timedelta(hours=1))[0] == 0

@@ -147,3 +147,13 @@ def test_rider_documents_are_required_and_checked(session):
     assert (rider.permit_number, rider.national_id, rider.plate, rider.documents_checked_by) == (
         "DL1234567", "CM90001234ABCD", "UFA123B", ADMIN,
     )  # fmt: skip
+
+
+def test_a_failed_delivery_nobody_rescheduled_is_cleaned_up_and_forgettable(session):
+    merchant, rider = make_merchant(session), make_rider(session)
+    order = advance(session, book(session, merchant), rider, S.FAILED)
+    order.updated_at = T0
+    session.flush()
+    assert privacy.purge_old_data(session, T0 + timedelta(days=91))["orders"] == 1
+    assert order.drop_lat is None and order.purged_at is not None
+    assert "1 delivery(ies)" in privacy.forget(session, order.customer_phone, T0)

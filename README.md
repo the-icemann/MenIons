@@ -67,7 +67,7 @@ EFRIS: an admin issues it on URA's portal and sends /fdn REF FDN CODE   (EFRIS_P
   still records the FDN at once if it's already issued.
 - The pawaPay sandbox needs no real money: sign up at https://dashboard.sandbox.pawapay.io, set
   `PAYMENTS_PROVIDER=pawapay` and `PAWAPAY_API_TOKEN`, and point the deposit and refund callback URLs
-  at `<PUBLIC_BASE_URL>/webhooks/pawapay`.
+  at `<PUBLIC_BASE_URL>/webhooks/pawapay?k=<PAWAPAY_CALLBACK_TOKEN>`.
 
 ## Privacy
 
@@ -150,7 +150,7 @@ git-ignored.
 | `MEDIA_DIR` | Where pickup and delivery photos are saved (default `var/media`) |
 | `PAYMENTS_PROVIDER` | `manual` (default: Mobile Money by hand, `/approve`) or `pawapay` (PIN prompt) |
 | `PAWAPAY_API_TOKEN`, `PAWAPAY_API_BASE` | pawaPay API token and base URL (sandbox by default; production `https://api.pawapay.io`) |
-| `PAWAPAY_CALLBACK_TOKEN` | Optional; if set, the callback URL must end in `?k=<token>` |
+| `PAWAPAY_CALLBACK_TOKEN` | Required with `pawapay` (16+ random characters); the callback URL ends in `?k=<token>` |
 | `EFRIS_PROVIDER` | `manual` (default: `/fdn` from admins) or `fake` (development only) |
 | `EFRIS_ALERT_HOURS` | Alert admins when an FDN has waited this long (default 12; URA allows 24) |
 | `DATA_RETENTION_DAYS` | Days after an order closes before its personal data is deleted (default 90, minimum 7) |
@@ -160,7 +160,7 @@ The app refuses to start when:
 
 - `ENV=production` and `WHATSAPP_WEBHOOK_SIGNATURE=none`;
 - a provider or signature mode is chosen without its secret, or without a phone number id;
-- `PAYMENTS_PROVIDER=pawapay` without `PAWAPAY_API_TOKEN`;
+- `PAYMENTS_PROVIDER=pawapay` without `PAWAPAY_API_TOKEN`, or without a `PAWAPAY_CALLBACK_TOKEN` of 16+ characters;
 - `ENV=production` and `EFRIS_PROVIDER=fake`.
 
 ## Switching WhatsApp provider

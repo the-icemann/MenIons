@@ -59,9 +59,9 @@ class Settings(BaseSettings):
     pawapay_api_token: str = ""
     # Sandbox by default. Production: https://api.pawapay.io
     pawapay_api_base: str = "https://api.sandbox.pawapay.io"
-    # Optional: a long random string added to the callback URL as ?k=... in pawaPay's dashboard.
-    # Callbacks are never trusted on their own (we always re-check the status with pawaPay),
-    # so this only keeps strangers from making us call pawaPay.
+    # Required with pawapay: a long random string added to the callback URL as ?k=... in
+    # pawaPay's dashboard. Callbacks are never trusted on their own (we always re-check the
+    # status with pawaPay); this keeps strangers from triggering checks and alerts.
     pawapay_callback_token: str = ""
 
     # --- EFRIS (URA e-receipts) ------------------------------------------------------
@@ -112,6 +112,8 @@ class Settings(BaseSettings):
             problems.append(f"WHATSAPP_PROVIDER={self.whatsapp_provider} needs WHATSAPP_PHONE_NUMBER_ID")
         if self.payments_provider == "pawapay" and not self.pawapay_api_token:
             problems.append("PAYMENTS_PROVIDER=pawapay needs PAWAPAY_API_TOKEN")
+        if self.payments_provider == "pawapay" and len(self.pawapay_callback_token) < 16:
+            problems.append("PAYMENTS_PROVIDER=pawapay needs PAWAPAY_CALLBACK_TOKEN (16+ random characters)")
         if self.env == "production" and self.efris_provider == "fake":
             problems.append("EFRIS_PROVIDER=fake is not allowed when ENV=production")
         if self.data_retention_days < 7:

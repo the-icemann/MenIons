@@ -58,10 +58,16 @@ def daily_cleanup(session: Session, now: datetime) -> None:
     privacy.purge_old_data(session, now)
 
 
+def commit_and_send(session: Session) -> None:
+    """Between the items of a batch: keep what is done, send its messages, release locks."""
+    session.commit()
+    deliver(session, take_outbox(session))
+
+
 FREQUENT: list[tuple[str, Callable[[Session, datetime], object]]] = [
-    ("poll_deposits", billing.poll_deposits),
-    ("poll_refunds", billing.poll_refunds),
-    ("fiscalise", billing.fiscalise_pending),
+    ("poll_deposits", lambda s, now: billing.poll_deposits(s, now, commit_and_send)),
+    ("poll_refunds", lambda s, now: billing.poll_refunds(s, now, commit_and_send)),
+    ("fiscalise", lambda s, now: billing.fiscalise_pending(s, now, commit_and_send)),
     ("efris_alerts", billing.alert_stale_fiscal),
 ]
 DAILY: list[tuple[str, Callable[[Session, datetime], object]]] = [
