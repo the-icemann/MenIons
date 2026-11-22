@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from app import messaging, plans, router
+from app import billing, messaging, plans, router
 from app.config import get_settings
 from app.events import ButtonReply, ContactShared, ListReply, LocationShared, MediaReceived, TextMessage
 from app.messaging import Outgoing, deliver, take_outbox
@@ -73,9 +73,13 @@ def photo(session, sender):
 
 
 def talk(session, event) -> list[Outgoing]:
+    """One inbound message, handled as the webhook does: dispatch, commit, then send any
+    payment requests to pawaPay; returns the queued replies."""
     take_outbox(session)
+    billing.take_queued_deposits(session)
     with session.begin_nested():
         router.dispatch(session, event)
+    billing.send_queued_deposits(session, billing.take_queued_deposits(session))
     return take_outbox(session)
 
 
@@ -103,7 +107,8 @@ def test_from_first_hello_to_delivered(session):
 
     # Onboarding
     out = say(session, shop, "Hello")
-    assert ("onb:start", "Register my shop") in buttons(out, shop)
+    assert ("onb:start", "Agree & register") in buttons(out, shop)
+    assert "https://menions.test/privacy" in body(out, shop)
     assert "shop's name" in body(tap(session, shop, "onb:start"))
     say(session, shop, "Kisementi Threads")
     say(session, shop, "Akello Grace")
@@ -117,6 +122,7 @@ def test_from_first_hello_to_delivered(session):
     out = tap(session, shop, "onb:confirm")
     merchant = session.execute(select(Merchant).where(Merchant.phone == shop)).scalar_one()
     assert merchant.status == MerchantStatus.PENDING and merchant.pickup_lat == 0.3136
+    assert merchant.privacy_accepted_at is not None  # agreed when tapping "Agree & register"
     assert "plan:weekly_gold" in rows(out, shop) and "Weekly Gold" in body(out, shop)
     assert "New shop registered" in body(out, ADMIN)
 
@@ -135,9 +141,13 @@ def test_from_first_hello_to_delivered(session):
     assert "Approved" in body(out, ADMIN)
 
     # A rider joins and goes on shift
-    say(session, ADMIN, f"/rider add {rider_phone} Musa K")
+    say(session, ADMIN, f"/rider add {rider_phone} DL1234567 CM90001234ABCD UFA123B Musa K")
     rider = session.execute(select(Rider).where(Rider.phone == rider_phone)).scalar_one()
-    assert ("r:on", "Go on shift") in buttons(say(session, rider_phone, "hi"), rider_phone)
+    assert (rider.permit_number, rider.national_id, rider.plate) == ("DL1234567", "CM90001234ABCD", "UFA123B")
+    out = say(session, rider_phone, "hi")
+    assert ("r:agree", "I agree") in buttons(out, rider_phone) and "privacy" in body(out, rider_phone)
+    assert ("r:on", "Go on shift") in buttons(tap(session, rider_phone, "r:agree"), rider_phone)
+    assert rider.privacy_accepted_at is not None
     tap(session, rider_phone, "r:on")
     assert rider.on_shift
 
@@ -351,7 +361,7 @@ def test_admin_errors_are_explained(session):
     merchant = make_merchant(session, plan=None, status=MerchantStatus.PENDING)
     request = plans.create_plan_request(session, merchant, "weekly_gold", at=T0)
     reply = body(say(session, ADMIN, f"/approve {request.momo_reference} 000gr"))
-    assert "3 parts" in reply and f"/approve {request.momo_reference} " in reply
+    assert "both the EFRIS FDN and the verification code" in reply
     assert request.status == PlanRequestStatus.AWAITING_PAYMENT
     assert "Unknown command" in body(say(session, ADMIN, "/dance"))
     assert "Unknown command" in body(say(session, ADMIN, "/cash 0772123456 5000"))  # riders don't handle money
@@ -360,7 +370,7 @@ def test_admin_errors_are_explained(session):
 
 def test_as_lets_one_admin_phone_play_every_part(session):
     merchant = make_merchant(session, phone=ADMIN)
-    session.add(Rider(name="Admin Rider", phone=ADMIN, on_shift=False))
+    session.add(Rider(name="Admin Rider", phone=ADMIN, on_shift=False, privacy_accepted_at=T0))
     session.flush()
     order = book(session, merchant, customer_phone=ADMIN)
     assert "m:book" in rows(say(session, ADMIN, "hi"), ADMIN)  # merchant comes first
@@ -429,7 +439,7 @@ def test_a_failing_send_is_recorded_and_the_rest_still_go(session, fake_provider
 def test_a_kapso_hello_gets_the_welcome_reply(session, client, fake_provider):
     assert client.post("/webhooks/whatsapp", json=fixture_payload("kapso_text")).status_code == 200
     (sent,) = fake_provider.sent
-    assert sent.phone == "+256772123456" and sent.method == "send_buttons" and "Register my shop" in str(sent.payload)
+    assert sent.phone == "+256772123456" and sent.method == "send_buttons" and "Agree & register" in str(sent.payload)
 
 
 def test_a_handler_error_sends_nothing(session, client, fake_provider, monkeypatch):

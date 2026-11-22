@@ -31,6 +31,12 @@ os.environ.update(
     WHATSAPP_UPDATE_TEMPLATE="",
     PUBLIC_BASE_URL="https://menions.test",
     MEDIA_DIR="/tmp/menions-test-media",
+    PAYMENTS_PROVIDER="manual",
+    EFRIS_PROVIDER="manual",
+    PAWAPAY_API_TOKEN="",
+    PAWAPAY_CALLBACK_TOKEN="",
+    DATA_RETENTION_DAYS="90",
+    PRIVACY_CONTACT="",
 )
 
 from alembic import command  # noqa: E402
@@ -109,6 +115,7 @@ def make_merchant(session, *, plan="weekly_gold", status=MerchantStatus.ACTIVE, 
 
 
 def make_rider(session, **kwargs) -> Rider:
+    kwargs.setdefault("privacy_accepted_at", T0)  # an existing rider who has accepted the notice
     rider = Rider(name=kwargs.pop("name", "Musa K"), phone=phone(), on_shift=True, **kwargs)
     session.add(rider)
     session.flush()

@@ -33,5 +33,21 @@ services:
       - .:/srv
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+  # Payment status checks, EFRIS retries and alerts, the daily check and data clean-up.
+  worker:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://menions:menions@db:5432/menions
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/srv
+    command: python -m app.worker
+    restart: unless-stopped
+
 volumes:
   pgdata:
